@@ -105,6 +105,15 @@ jobs:
           ./scripts/feeds install -a
           ./scripts/feeds install -a -f -p qmodem
 
+      - name: Install root filesystem overlay
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d ../files ]; then
+            rsync -a ../files/ files/
+          fi
+
       - name: Generate build config
         working-directory: openwrt
         shell: bash

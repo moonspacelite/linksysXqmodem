@@ -1,0 +1,65 @@
+#!/bin/sh
+
+case "$ACTION" in
+	add|bind) ;;
+	*) exit 0 ;;
+esac
+
+find_usb_device_dir() {
+	local path="/sys${DEVPATH}"
+	local slot
+
+	slot="$(basename "$DEVPATH")"
+	slot="${slot%%:*}"
+	if [ -f "/sys/bus/usb/devices/${slot}/idVendor" ]; then
+		printf '%s\n' "/sys/bus/usb/devices/${slot}"
+		return 0
+	fi
+
+	while [ "$path" != "/sys" ] && [ "$path" != "/" ]; do
+		if [ -f "${path}/idVendor" ] && [ -f "${path}/idProduct" ]; then
+			printf '%s\n' "$path"
+			return 0
+		fi
+		path="$(dirname "$path")"
+	done
+
+	return 1
+}
+
+bind_serial_driver() {
+	local vendor="$1"
+	local product="$2"
+	local driver
+	local new_id
+
+	modprobe usbserial 2>/dev/null || true
+	modprobe option 2>/dev/null || true
+	modprobe qcserial 2>/dev/null || true
+
+	for driver in generic option1 option; do
+		new_id="/sys/bus/usb-serial/drivers/${driver}/new_id"
+		[ -w "$new_id" ] || continue
+
+		if echo "${vendor} ${product}" > "$new_id" 2>/dev/null; then
+			logger -t t99w175-hotplug "bound ${vendor}:${product} to usb-serial ${driver}"
+			return 0
+		fi
+	done
+
+	logger -t t99w175-hotplug "unable to bind ${vendor}:${product} to usb-serial"
+	return 1
+}
+
+device_dir="$(find_usb_device_dir)" || exit 0
+vendor="$(tr 'A-F' 'a-f' < "${device_dir}/idVendor")"
+product="$(tr 'A-F' 'a-f' < "${device_dir}/idProduct")"
+
+case "${vendor}:${product}" in
+	05c6:90d5|05c6:9025)
+		for tty in "${device_dir}"/*/ttyUSB* "${device_dir}"/ttyUSB*; do
+			[ -e "$tty" ] && exit 0
+		done
+		bind_serial_driver "$vendor" "$product"
+		;;
+esac

@@ -21,6 +21,28 @@ Workflow otomatis:
 - build target `ipq40xx/generic` untuk `linksys_ea6350v3`;
 - upload `factory.bin`, `sysupgrade.bin`, `sha256sums`, dan `config.seed`.
 
+## T99W175 / DW5930e
+
+Firmware ini memasukkan hotplug script untuk modem Foxconn T99W175/DW5930e.
+Saat modem muncul sebagai `05c6:90d5` atau `05c6:9025`, script akan otomatis
+melakukan binding ke driver `usb-serial` sehingga port AT tidak perlu dibuat
+manual dengan `echo ... > /sys/bus/usb-serial/drivers/generic/new_id`.
+
+Paket pendukung yang ikut dibuild:
+
+- `kmod-usb-serial-qualcomm`
+- `kmod-usb-serial-option`
+- `kmod-usb-net-cdc-mbim`
+- `kmod-usb-net-qmi-wwan`
+- `picocom`
+- `umbim`
+- `uqmi`
+- `usbutils`
+
+Pada setup yang umum, AT port T99W175 muncul sebagai `/dev/ttyUSB2`.
+QModem tetap dibiarkan melakukan scan otomatis, jadi port tidak di-hardcode
+ke satu nama device.
+
 ## Catatan penting EA6350v3
 
 Pada OpenWrt baru, EA6350v3 memakai kernel partition size yang lebih besar.
