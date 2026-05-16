@@ -1,0 +1,199 @@
+name: Build OpenWrt EA6350v3 QModem
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: "OpenWrt release version, for example 25.12.4"
+        required: true
+        default: "25.12.4"
+        type: string
+      qmodem_ref:
+        description: "QModem branch, tag, or commit"
+        required: true
+        default: "main"
+        type: string
+      qmodem_ui:
+        description: "QModem LuCI UI variant"
+        required: true
+        default: "modern"
+        type: choice
+        options:
+          - modern
+          - legacy
+      create_release:
+        description: "Also publish/update a GitHub Release"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: OpenWrt ${{ inputs.openwrt_version }} for Linksys EA6350v3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Normalize inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ inputs.openwrt_version }}"
+          version="${version#v}"
+
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){1,2}(-rc[0-9]+)?$ ]]; then
+            echo "::error::openwrt_version must look like 25.12.4, 25.12.0-rc1, or 24.10"
+            exit 1
+          fi
+
+          openwrt_ref="v${version}"
+          if ! git ls-remote --exit-code --tags https://github.com/openwrt/openwrt.git "refs/tags/${openwrt_ref}" >/dev/null; then
+            echo "::error::OpenWrt tag ${openwrt_ref} was not found"
+            exit 1
+          fi
+
+          qmodem_ref="${{ inputs.qmodem_ref }}"
+          if ! git ls-remote --exit-code https://github.com/FUjr/QModem.git "${qmodem_ref}" >/dev/null; then
+            echo "::error::QModem ref ${qmodem_ref} was not found"
+            exit 1
+          fi
+
+          artifact_name="openwrt-${version}-linksys-ea6350v3-qmodem-${{ inputs.qmodem_ui }}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "openwrt_ref=${openwrt_ref}" >> "$GITHUB_OUTPUT"
+          echo "qmodem_ref=${qmodem_ref}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
+            ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gperf \
+            help2man intltool libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool llvm lld mkisofs msmtp ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pip python3-ply python3-docutils qemu-utils \
+            re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl \
+            unzip vim wget xmlto xxd zlib1g-dev zstd
+
+      - name: Clone OpenWrt source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ steps.inputs.outputs.openwrt_ref }}" https://github.com/openwrt/openwrt.git openwrt
+
+      - name: Add feeds and install packages
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git;%s\n' "${{ steps.inputs.outputs.qmodem_ref }}" >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds install -a -f -p qmodem
+
+      - name: Generate build config
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp ../configs/linksys_ea6350v3.seed .config
+
+          if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
+            {
+              echo "CONFIG_PACKAGE_luci-app-qmodem-next=y"
+              echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y"
+              echo "CONFIG_PACKAGE_quectel-CM-5G-M=y"
+            } >> .config
+          else
+            {
+              echo "CONFIG_PACKAGE_luci-app-qmodem=y"
+              echo "CONFIG_PACKAGE_luci-app-qmodem-sms=y"
+              echo "CONFIG_PACKAGE_luci-app-qmodem-mwan=y"
+              echo "CONFIG_PACKAGE_luci-app-qmodem-ttl=y"
+            } >> .config
+          fi
+
+          make defconfig
+          ./scripts/diffconfig.sh | tee ../artifacts.config
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: openwrt-dl-${{ steps.inputs.outputs.openwrt_ref }}-${{ hashFiles('configs/linksys_ea6350v3.seed') }}
+          restore-keys: |
+            openwrt-dl-${{ steps.inputs.outputs.openwrt_ref }}-
+            openwrt-dl-
+
+      - name: Download sources
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+          make download -j"$(nproc)"
+
+      - name: Build firmware
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" V=s || make -j1 V=s
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p firmware
+          cp openwrt/bin/targets/ipq40xx/generic/*linksys_ea6350v3* firmware/
+          cp openwrt/bin/targets/ipq40xx/generic/sha256sums firmware/
+          cp artifacts.config firmware/config.seed
+
+          {
+            echo "OpenWrt version: ${{ steps.inputs.outputs.version }}"
+            echo "OpenWrt ref: ${{ steps.inputs.outputs.openwrt_ref }}"
+            echo "QModem ref: ${{ steps.inputs.outputs.qmodem_ref }}"
+            echo "QModem UI: ${{ inputs.qmodem_ui }}"
+            echo "Target: Linksys EA6350v3 / ipq40xx-generic / arm_cortex-a7_neon-vfpv4"
+          } > firmware/build-info.txt
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.inputs.outputs.artifact_name }}
+          path: firmware/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.create_release }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: openwrt-${{ steps.inputs.outputs.version }}-ea6350v3-qmodem
+          RELEASE_NAME: OpenWrt ${{ steps.inputs.outputs.version }} EA6350v3 QModem
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" firmware/* --clobber
+          else
+            gh release create "$TAG_NAME" firmware/* \
+              --title "$RELEASE_NAME" \
+              --notes "Custom OpenWrt ${{ steps.inputs.outputs.version }} firmware for Linksys EA6350v3 with QModem (${{ steps.inputs.outputs.qmodem_ref }})."
+          fi

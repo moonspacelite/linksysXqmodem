@@ -1,0 +1,4 @@
+openwrt/
+firmware/
+dl/
+*.log

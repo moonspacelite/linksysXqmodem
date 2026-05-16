@@ -1,0 +1,13 @@
+CONFIG_TARGET_ipq40xx=y
+CONFIG_TARGET_ipq40xx_generic=y
+CONFIG_TARGET_DEVICE_ipq40xx_generic_DEVICE_linksys_ea6350v3=y
+CONFIG_TARGET_ROOTFS_SQUASHFS=y
+
+# LuCI base web interface.
+CONFIG_PACKAGE_luci=y
+
+# QModem base package and default USB/QMI choices.
+CONFIG_PACKAGE_qmodem=y
+CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_ndisc6=y
+CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_vendor-qmi-wwan=y
+CONFIG_PACKAGE_luci-app-qmodem_USE_TOM_CUSTOMIZED_QUECTEL_CM=y
