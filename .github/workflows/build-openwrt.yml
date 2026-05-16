@@ -105,6 +105,17 @@ jobs:
           ./scripts/feeds install -a
           ./scripts/feeds install -a -f -p qmodem
 
+      - name: Patch QModem T99W175 detection
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scan_script="feeds/qmodem/application/qmodem/files/usr/share/qmodem/modem_scan.sh"
+          if [ -f "$scan_script" ]; then
+            sed -i 's/\*"T99W175"\*/\*"t99w175"\*/g' "$scan_script"
+          fi
+
       - name: Install root filesystem overlay
         working-directory: openwrt
         shell: bash
