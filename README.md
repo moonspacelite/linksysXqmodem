@@ -111,6 +111,9 @@ Default LPAC disetel untuk T99W175 mode MBIM:
 
 Default ini menjaga LPAC memakai `mbim-proxy` supaya akses eUICC tidak berebut
 port MBIM dengan koneksi modem yang sedang aktif.
+Binary proxy tersebut disediakan oleh paket `libmbim` sebagai
+`/usr/libexec/mbim-proxy`; workflow build akan gagal jika `libmbim` atau
+`mbim-utils` tidak masuk manifest firmware.
 
 Firmware ini sengaja tidak memasukkan `modemmanager` atau
 `luci-proto-modemmanager`. QModem menjadi satu-satunya pemilik koneksi MBIM

@@ -164,6 +164,7 @@ check_cmd() { command -v "$1" 2>/dev/null; }
 load_uci_config() {
     command -v uci >/dev/null 2>&1 || return 0
     _v="$(uci -q get lpac-esim.main.apdu_backend 2>/dev/null)"; [ -n "$_v" ] && BACKEND="$_v"
+    _v="$(uci -q get lpac-esim.main.http_backend 2>/dev/null)"; [ -n "$_v" ] && HTTP_BACKEND="$_v"
     _v="$(uci -q get lpac-esim.main.qmi_device 2>/dev/null)"; [ -n "$_v" ] && QMI_DEVICE="$_v"
     _v="$(uci -q get lpac-esim.main.qmi_sim_slot 2>/dev/null)"; [ -n "$_v" ] && QMI_SLOT="$_v"
     _v="$(uci -q get lpac-esim.main.at_device 2>/dev/null)"; [ -n "$_v" ] && AT_DEVICE="$_v"
@@ -279,8 +280,37 @@ build_lpac_env() {
     [ -n "$CUSTOM_ISD_R_AID" ] && printf ' LPAC_CUSTOM_ISD_R_AID=%s' "$CUSTOM_ISD_R_AID"
 }
 
+prepare_lpac_transport() {
+    if [ "$BACKEND" = "mbim" ]; then
+        [ -n "$MBIM_DEVICE" ] || MBIM_DEVICE="/dev/cdc-wdm0"
+        export LPAC_APDU="mbim"
+        export LPAC_HTTP="$HTTP_BACKEND"
+        export LPAC_APDU_MBIM_DEVICE="$MBIM_DEVICE"
+        [ -n "$CUSTOM_ISD_R_AID" ] && export LPAC_CUSTOM_ISD_R_AID="$CUSTOM_ISD_R_AID"
+
+        if [ "$MBIM_PROXY" = "1" ]; then
+            if [ ! -x /usr/libexec/mbim-proxy ]; then
+                syslog_msg "ERROR: /usr/libexec/mbim-proxy missing; install libmbim before using LPAC over MBIM"
+                return 1
+            fi
+            export LPAC_APDU_MBIM_USE_PROXY=1
+            export LIBMBIM_USE_PROXY=1
+            export MBIM_USE_PROXY=1
+        fi
+
+        if [ "$MBIM_SKIP_SLOT_MAPPING" = "1" ]; then
+            export LPAC_APDU_MBIM_SKIP_SLOT_MAPPING=1
+        fi
+    fi
+    return 0
+}
+
 run_lpac_json_to_file() {
     action="$1"; out="$2"; t_sec="${3:-15}"
+    if ! prepare_lpac_transport; then
+        printf '%s\n' '{"type":"lpa","payload":{"code":-1,"message":"mbim_proxy_missing","data":null}}' > "$out"
+        return 1
+    fi
     envs="$(build_lpac_env)"; cmd="$envs $LPAC_BIN $action"
     log_verbose "Executing (Timeout ${t_sec}s): $cmd"
     if run_with_timeout "$t_sec" sh -c "$cmd > \"$out\" 2>>\"$LOG_FILE\""; then return 0
@@ -520,9 +550,9 @@ reboot_modem_hard() {
         wait_device="$MBIM_DEVICE"
         if [ -n "$MBIMCLI_BIN" ] && [ -e "$MBIM_DEVICE" ]; then
             step "Executing MBIM UICC Reset..."
-            if "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=off >/dev/null 2>&1; then
+            if "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --device-open-proxy --set-radio-state=off >/dev/null 2>&1; then
                 sleep 2
-                "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=on >/dev/null 2>&1
+                "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --device-open-proxy --set-radio-state=on >/dev/null 2>&1
                 ok "MBIM radio reset sent."
                 reboot_ok=1
             else
@@ -1163,6 +1193,10 @@ api_version() {
         mbim) dev="${MBIM_DEVICE:-?}" ;;
         at)   dev="${AT_DEVICE:-?}" ;;
     esac
+    local mbim_proxy_binary="missing"
+    local mbim_proxy_running="0"
+    [ -x /usr/libexec/mbim-proxy ] && mbim_proxy_binary="/usr/libexec/mbim-proxy"
+    pidof mbim-proxy >/dev/null 2>&1 && mbim_proxy_running="1"
     "$JQ_BIN" -nc \
         --arg sv "$script_ver" \
         --arg lv "$lpac_ver" \
@@ -1171,7 +1205,10 @@ api_version() {
         --arg at "${AT_DEVICE:-none}" \
         --arg qmi "${QMI_DEVICE:-none}" \
         --arg mbim "${MBIM_DEVICE:-none}" \
-        '{"type":"lpa","payload":{"code":0,"message":"success","data":{"script_version":$sv,"lpac_version":$lv,"backend":$be,"device":$dev,"at_device":$at,"qmi_device":$qmi,"mbim_device":$mbim}}}'
+        --arg mbim_proxy_config "${MBIM_PROXY:-0}" \
+        --arg mbim_proxy_binary "$mbim_proxy_binary" \
+        --arg mbim_proxy_running "$mbim_proxy_running" \
+        '{"type":"lpa","payload":{"code":0,"message":"success","data":{"script_version":$sv,"lpac_version":$lv,"backend":$be,"device":$dev,"at_device":$at,"qmi_device":$qmi,"mbim_device":$mbim,"mbim_proxy_config":$mbim_proxy_config,"mbim_proxy_binary":$mbim_proxy_binary,"mbim_proxy_running":$mbim_proxy_running}}}'
 }
 
 # POST at-cmd <command> — send AT command to serial port, return response
@@ -1238,9 +1275,9 @@ api_at_cmd() {
 api_soft_reset() {
     api_check_lock || return 1
     if [ "$BACKEND" = "mbim" ] && [ -n "$MBIMCLI_BIN" ] && [ -e "$MBIM_DEVICE" ]; then
-        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=off >/dev/null 2>&1
+        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --device-open-proxy --set-radio-state=off >/dev/null 2>&1
         sleep 2
-        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=on >/dev/null 2>&1
+        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --device-open-proxy --set-radio-state=on >/dev/null 2>&1
         syslog_msg "API: Soft reset via MBIM radio toggle"
         api_ok '{"method":"mbim_radio"}' "success"
     elif [ -n "$QMICLI_BIN" ] && [ -n "$QMI_DEVICE" ] && [ -e "$QMI_DEVICE" ]; then
@@ -1292,7 +1329,7 @@ api_uicc_reset() {
         api_ok "{\"method\":\"qmi_uim\",\"slot\":$slot}" "success"
     elif [ -n "$MBIMCLI_BIN" ] && [ -n "$MBIM_DEVICE" ] && [ -e "$MBIM_DEVICE" ]; then
         syslog_msg "API: UICC SIM reset via MBIM"
-        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --ms-set-uicc-reset=0 >/dev/null 2>&1
+        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --device-open-proxy --ms-set-uicc-reset=0 >/dev/null 2>&1
         sleep 2
         api_ok '{"method":"mbim_uicc"}' "success"
     else
@@ -1394,8 +1431,10 @@ menu_maintenance() {
             5) select_qmi_device; select_at_port ;;
             6) title; info "OS  : $(uname -a 2>/dev/null)"; check_required_tools; check_lpac_version; info "Backend: $BACKEND (QMI: ${QMI_DEVICE:-none}, AT: ${AT_DEVICE:-none}, MBIM: ${MBIM_DEVICE:-none})"
                if [ "$BACKEND" = "mbim" ]; then
+                   if [ -x /usr/libexec/mbim-proxy ]; then ok "mbim-proxy installed: /usr/libexec/mbim-proxy"
+                   else warn "mbim-proxy binary is missing; install libmbim"; fi
                    if pidof mbim-proxy >/dev/null 2>&1; then ok "mbim-proxy is running"
-                   else warn "mbim-proxy is NOT running (may be needed for MBIM mode)"; fi
+                   else warn "mbim-proxy is not running yet; it starts on first proxied MBIM client"; fi
                fi ;;
             0) return 0 ;;
             q|Q|quit|exit) exit 0 ;;

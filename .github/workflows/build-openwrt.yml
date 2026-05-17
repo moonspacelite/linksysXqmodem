@@ -444,13 +444,23 @@ jobs:
             cat "$manifest"
             exit 1
           fi
+          if ! grep -Eq '^libmbim[[:space:]-]' "$manifest"; then
+            echo "::error::libmbim is missing from the firmware manifest; /usr/libexec/mbim-proxy comes from libmbim"
+            cat "$manifest"
+            exit 1
+          fi
+          if ! grep -Eq '^mbim-utils[[:space:]-]' "$manifest"; then
+            echo "::error::mbim-utils is missing from the firmware manifest"
+            cat "$manifest"
+            exit 1
+          fi
           if grep -Eq '^(modemmanager|luci-proto-modemmanager)[[:space:]-]' "$manifest"; then
             echo "::error::ModemManager package unexpectedly entered the firmware manifest"
             grep -Ei 'modemmanager|lpac' "$manifest" || true
             exit 1
           fi
           echo "LPAC/ModemManager manifest validation passed:"
-          grep -E '^(lpac|luci-app-lpac-manager|0xygen-aio)[[:space:]-]' "$manifest" || true
+          grep -E '^(lpac|luci-app-lpac-manager|0xygen-aio|libmbim|mbim-utils)[[:space:]-]' "$manifest" || true
 
       - name: Collect artifacts
         shell: bash
