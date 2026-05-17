@@ -30,11 +30,16 @@ on:
 permissions:
   contents: write
 
+env:
+  TARGET_PATH: ipq40xx/generic
+  TARGET_ARCH: arm_cortex-a7_neon-vfpv4
+  PROFILE: linksys_ea6350v3
+
 jobs:
   build:
     name: OpenWrt ${{ inputs.openwrt_version }} for Linksys EA6350v3
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     steps:
       - name: Checkout this repository
@@ -54,9 +59,19 @@ jobs:
             exit 1
           fi
 
-          openwrt_ref="v${version}"
-          if ! git ls-remote --exit-code --tags https://github.com/openwrt/openwrt.git "refs/tags/${openwrt_ref}" >/dev/null; then
-            echo "::error::OpenWrt tag ${openwrt_ref} was not found"
+          base_url="https://downloads.openwrt.org/releases/${version}/targets/${TARGET_PATH}"
+          dir_index="$(curl -fsSL "${base_url}/")"
+
+          imagebuilder="$(grep -o "openwrt-imagebuilder-${version}-ipq40xx-generic\\.Linux-x86_64\\.tar\\.zst" <<<"$dir_index" | head -n1 || true)"
+          sdk="$(grep -o "openwrt-sdk-${version}-ipq40xx-generic_[^\"]*\\.Linux-x86_64\\.tar\\.zst" <<<"$dir_index" | head -n1 || true)"
+
+          if [[ -z "$imagebuilder" ]]; then
+            echo "::error::ImageBuilder for OpenWrt ${version} (${TARGET_PATH}) was not found"
+            exit 1
+          fi
+
+          if [[ -z "$sdk" ]]; then
+            echo "::error::SDK for OpenWrt ${version} (${TARGET_PATH}) was not found"
             exit 1
           fi
 
@@ -68,7 +83,9 @@ jobs:
 
           artifact_name="openwrt-${version}-linksys-ea6350v3-qmodem-${{ inputs.qmodem_ui }}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "openwrt_ref=${openwrt_ref}" >> "$GITHUB_OUTPUT"
+          echo "base_url=${base_url}" >> "$GITHUB_OUTPUT"
+          echo "imagebuilder_url=${base_url}/${imagebuilder}" >> "$GITHUB_OUTPUT"
+          echo "sdk_url=${base_url}/${sdk}" >> "$GITHUB_OUTPUT"
           echo "qmodem_ref=${qmodem_ref}" >> "$GITHUB_OUTPUT"
           echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
 
@@ -76,26 +93,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
-            build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
-            ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gperf \
-            help2man intltool libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-            libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev \
-            libssl-dev libtool llvm lld mkisofs msmtp ninja-build p7zip p7zip-full \
-            patch pkgconf python3 python3-pip python3-ply python3-docutils qemu-utils \
-            re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl \
-            unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl file gawk gettext git \
+            libncurses-dev python3 python3-pyelftools rsync unzip wget zstd
 
-      - name: Clone OpenWrt source
+      - name: Download OpenWrt SDK and ImageBuilder
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ steps.inputs.outputs.openwrt_ref }}" https://github.com/openwrt/openwrt.git openwrt
+          mkdir -p build
+          cd build
 
-      - name: Add feeds and install packages
-        working-directory: openwrt
+          curl -fL --retry 5 --retry-delay 2 -o sdk.tar.zst "${{ steps.inputs.outputs.sdk_url }}"
+          tar --use-compress-program=unzstd -xf sdk.tar.zst
+          mv openwrt-sdk-* sdk
+
+          curl -fL --retry 5 --retry-delay 2 -o imagebuilder.tar.zst "${{ steps.inputs.outputs.imagebuilder_url }}"
+          tar --use-compress-program=unzstd -xf imagebuilder.tar.zst
+          mv openwrt-imagebuilder-* imagebuilder
+
+      - name: Build QModem packages with SDK
+        working-directory: build/sdk
         shell: bash
         run: |
           set -euo pipefail
@@ -105,91 +124,115 @@ jobs:
           ./scripts/feeds install -a
           ./scripts/feeds install -a -f -p qmodem
 
-      - name: Patch QModem T99W175 detection
-        working-directory: openwrt
-        shell: bash
-        run: |
-          set -euo pipefail
-
           scan_script="feeds/qmodem/application/qmodem/files/usr/share/qmodem/modem_scan.sh"
-          if [ -f "$scan_script" ]; then
+          if [[ -f "$scan_script" ]]; then
             sed -i 's/\*"T99W175"\*/\*"t99w175"\*/g' "$scan_script"
           fi
 
-      - name: Install root filesystem overlay
-        working-directory: openwrt
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -d ../files ]; then
-            rsync -a ../files/ files/
-          fi
-
-      - name: Generate build config
-        working-directory: openwrt
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cp ../configs/linksys_ea6350v3.seed .config
-
-          if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
-            {
-              echo "CONFIG_PACKAGE_luci-app-qmodem-next=y"
-              echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y"
-              echo "CONFIG_PACKAGE_quectel-CM-5G-M=y"
-            } >> .config
-          else
-            {
-              echo "CONFIG_PACKAGE_luci-app-qmodem=y"
-              echo "CONFIG_PACKAGE_luci-app-qmodem-sms=y"
-              echo "CONFIG_PACKAGE_luci-app-qmodem-mwan=y"
-              echo "CONFIG_PACKAGE_luci-app-qmodem-ttl=y"
-            } >> .config
-          fi
+          {
+            echo "CONFIG_PACKAGE_qmodem=m"
+            echo "CONFIG_PACKAGE_ubus-at-daemon=m"
+            echo "CONFIG_PACKAGE_tom_modem=m"
+            echo "CONFIG_PACKAGE_sms-tool_q=m"
+            echo "CONFIG_PACKAGE_sms-forwarder=m"
+            echo "CONFIG_PACKAGE_sms-forwarder-next=m"
+            echo "CONFIG_PACKAGE_quectel-CM-5G-M=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-next=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-sms=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-mwan=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-ttl=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_ndisc6=y"
+            echo "CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_generic-qmi-wwan=y"
+            echo "CONFIG_PACKAGE_luci-app-qmodem_USE_TOM_CUSTOMIZED_QUECTEL_CM=y"
+          } >> .config
 
           make defconfig
-          ./scripts/diffconfig.sh | tee ../artifacts.config
 
-      - name: Cache downloads
-        uses: actions/cache@v4
-        with:
-          path: openwrt/dl
-          key: openwrt-dl-${{ steps.inputs.outputs.openwrt_ref }}-${{ hashFiles('configs/linksys_ea6350v3.seed') }}
-          restore-keys: |
-            openwrt-dl-${{ steps.inputs.outputs.openwrt_ref }}-
-            openwrt-dl-
+          if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
+            packages=(
+              ubus-at-daemon
+              tom_modem
+              sms-tool_q
+              sms-forwarder-next
+              quectel-CM-5G-M
+              qmodem
+              luci-app-qmodem-next
+            )
+          else
+            packages=(
+              ubus-at-daemon
+              tom_modem
+              sms-tool_q
+              sms-forwarder
+              quectel-CM-5G-M
+              qmodem
+              luci-app-qmodem
+              luci-app-qmodem-sms
+              luci-app-qmodem-mwan
+              luci-app-qmodem-ttl
+            )
+          fi
 
-      - name: Download sources
-        working-directory: openwrt
+          for pkg in "${packages[@]}"; do
+            echo "Building ${pkg}"
+            make "package/feeds/qmodem/${pkg}/compile" -j"$(nproc)" V=s || make "package/feeds/qmodem/${pkg}/compile" -j1 V=s
+          done
+
+          mkdir -p ../qmodem-packages
+          find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) -path '*/qmodem/*' -print -exec cp -f {} ../qmodem-packages/ \;
+          ls -lah ../qmodem-packages
+
+      - name: Build firmware image with ImageBuilder
+        working-directory: build/imagebuilder
         shell: bash
         run: |
           set -euo pipefail
-          make download -j"$(nproc)"
 
-      - name: Build firmware
-        working-directory: openwrt
-        shell: bash
-        run: |
-          set -euo pipefail
-          make -j"$(nproc)" V=s || make -j1 V=s
+          mkdir -p packages files
+          cp -vf ../qmodem-packages/* packages/
+
+          if [[ -d ../../files ]]; then
+            rsync -a ../../files/ files/
+          fi
+
+          if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
+            qmodem_packages="qmodem luci-app-qmodem-next sms-forwarder-next quectel-CM-5G-M"
+          else
+            qmodem_packages="qmodem luci-app-qmodem luci-app-qmodem-sms luci-app-qmodem-mwan luci-app-qmodem-ttl sms-forwarder quectel-CM-5G-M"
+          fi
+
+          packages="luci ${qmodem_packages} kmod-usb-net-cdc-mbim kmod-usb-serial-option kmod-usb-serial-qualcomm usbutils picocom"
+
+          echo "Building ImageBuilder profile ${PROFILE}"
+          echo "Packages: ${packages}"
+          make image PROFILE="${PROFILE}" PACKAGES="${packages}" FILES="files/" V=s
 
       - name: Collect artifacts
         shell: bash
         run: |
           set -euo pipefail
 
+          target_dir="build/imagebuilder/bin/targets/${TARGET_PATH}"
           mkdir -p firmware
-          cp openwrt/bin/targets/ipq40xx/generic/*linksys_ea6350v3* firmware/
-          cp openwrt/bin/targets/ipq40xx/generic/sha256sums firmware/
-          cp artifacts.config firmware/config.seed
+
+          echo "Target directory contents:"
+          find "$target_dir" -maxdepth 2 -type f -printf '%p %k KB\n' | sort
+
+          mapfile -t images < <(find "$target_dir" -maxdepth 1 -type f \( -name '*linksys_ea6350v3*' -o -name '*sha256sums' -o -name '*profiles.json' \) | sort)
+          if [[ "${#images[@]}" -eq 0 ]]; then
+            echo "::error::No Linksys EA6350v3 firmware images were produced. The image may be too large for IMAGE_SIZE=35840k, or ImageBuilder rejected a package dependency."
+            exit 1
+          fi
+
+          cp -v "${images[@]}" firmware/
 
           {
             echo "OpenWrt version: ${{ steps.inputs.outputs.version }}"
-            echo "OpenWrt ref: ${{ steps.inputs.outputs.openwrt_ref }}"
             echo "QModem ref: ${{ steps.inputs.outputs.qmodem_ref }}"
             echo "QModem UI: ${{ inputs.qmodem_ui }}"
             echo "Target: Linksys EA6350v3 / ipq40xx-generic / arm_cortex-a7_neon-vfpv4"
+            echo "Builder: OpenWrt SDK + ImageBuilder"
           } > firmware/build-info.txt
 
       - name: Upload firmware artifact

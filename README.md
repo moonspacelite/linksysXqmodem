@@ -16,10 +16,14 @@ Custom OpenWrt firmware builder for Linksys EA6350v3 with QModem from
 
 Workflow otomatis:
 
-- clone OpenWrt sesuai tag `v<openwrt_version>`;
-- menambahkan feed `https://github.com/FUjr/QModem.git`;
-- build target `ipq40xx/generic` untuk `linksys_ea6350v3`;
-- upload `factory.bin`, `sysupgrade.bin`, `sha256sums`, dan `config.seed`.
+- download OpenWrt SDK dan ImageBuilder resmi untuk versi yang dipilih;
+- build paket QModem dari `https://github.com/FUjr/QModem.git` sebagai `.apk`;
+- patch deteksi model `T99W175` agar cocok dengan scan lowercase QModem;
+- build image `ipq40xx/generic` profile `linksys_ea6350v3` dengan ImageBuilder;
+- upload `factory.bin`, `sysupgrade.bin`, `sha256sums`, `profiles.json`, dan `build-info.txt`.
+
+Model SDK + ImageBuilder ini jauh lebih cepat daripada compile OpenWrt penuh
+dari source, tetapi paket QModem tetap dibuild sesuai versi OpenWrt yang dipilih.
 
 ## T99W175 / DW5930e
 
@@ -33,10 +37,7 @@ Paket pendukung yang ikut dibuild:
 - `kmod-usb-serial-qualcomm`
 - `kmod-usb-serial-option`
 - `kmod-usb-net-cdc-mbim`
-- `kmod-usb-net-qmi-wwan`
 - `picocom`
-- `umbim`
-- `uqmi`
 - `usbutils`
 
 Pada setup yang umum, AT port T99W175 muncul sebagai `/dev/ttyUSB2`.
