@@ -42,8 +42,9 @@ Workflow otomatis:
 - memakai paket QModem prebuilt jika tersedia, atau build paket QModem dari
   `https://github.com/FUjr/QModem.git` sebagai `.apk`;
 - patch QModem untuk deteksi dan kontrol T99W175 yang lebih cocok dengan modem ini;
-- memasukkan LPAC eSIM stack, LuCI eSIM Manager, CLI `esim`, Telegram eSIM bot,
-  HYFE helper dengan IMAP OTP, dan wrapper Ookla `speedtest`;
+- membuild ulang LPAC eSIM stack tanpa dependency ModemManager, lalu memasukkan
+  LuCI eSIM Manager, CLI `esim`, Telegram eSIM bot, HYFE helper dengan IMAP OTP,
+  dan wrapper Ookla `speedtest`;
 - build image `ipq40xx/generic` profile `linksys_ea6350v3` dengan ImageBuilder;
 - upload `factory.bin`, `sysupgrade.bin`, `sha256sums`, `profiles.json`, dan `build-info.txt`.
 
@@ -88,7 +89,7 @@ Saat flash pertama, firmware mengaktifkan WiFi otomatis:
 
 ## LPAC / eSIM default
 
-Firmware ini membawa paket prebuilt dari stack 0xygen-AIO:
+Firmware ini membawa stack 0xygen-AIO:
 
 - `lpac`
 - `luci-app-lpac-manager`
@@ -110,6 +111,11 @@ Default LPAC disetel untuk T99W175 mode MBIM:
 
 Default ini menjaga LPAC memakai `mbim-proxy` supaya akses eUICC tidak berebut
 port MBIM dengan koneksi modem yang sedang aktif.
+
+Firmware ini sengaja tidak memasukkan `modemmanager` atau
+`luci-proto-modemmanager`. QModem menjadi satu-satunya pemilik koneksi MBIM
+`/dev/cdc-wdm0` dan `wwan0`, sedangkan LPAC hanya memakai akses MBIM proxy
+untuk manajemen eSIM.
 
 ## Catatan penting EA6350v3
 

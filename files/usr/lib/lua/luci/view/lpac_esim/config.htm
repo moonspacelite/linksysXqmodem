@@ -59,11 +59,11 @@
             <div class="cbi-value" id="cfg-mbim-proxy-row" style="display: none;">
                 <label class="cbi-value-title"><%:MBIM Proxy%></label>
                 <div class="cbi-value-field">
-                    <select id="cfg-mbim-proxy" class="cbi-input-select" title="Enable mbim-proxy for shared access to MBIM port. Required when ModemManager is active.">
+                    <select id="cfg-mbim-proxy" class="cbi-input-select" title="Enable mbim-proxy for shared access to the MBIM port while QModem is online.">
                         <option value="0"><%:Disabled%></option>
                         <option value="1"><%:Enabled%></option>
                     </select>
-                    <div class="cbi-value-description"><%:Required when ModemManager is running. Prevents MBIM port conflicts (recommended: Enabled).%></div>
+                    <div class="cbi-value-description"><%:Keep enabled so LPAC can share /dev/cdc-wdm0 without interrupting QModem MBIM dial.%></div>
                 </div>
             </div>
             <div class="cbi-value" id="cfg-mbim-skip-slot-row" style="display: none;">

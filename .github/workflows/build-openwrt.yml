@@ -43,6 +43,8 @@ env:
   OPENWRT_TARGET_PATH: ipq40xx/generic
   OPENWRT_PROFILE: linksys_ea6350v3
   OPENWRT_ARCH_LABEL: arm_cortex-a7_neon-vfpv4
+  OXYGEN_AIO_FEED_URL: https://github.com/makungyu/0xygen-AIO.git
+  OXYGEN_AIO_REF: 1205f6c071e5dffdbf042e79058ef39e954ec00a
   OOKLA_SPEEDTEST_URL: https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-armhf.tgz
   OOKLA_SPEEDTEST_SHA256: e45fcdebbd8a185553535533dd032d6b10bc8c64eee4139b1147b9c09835d08d
 
@@ -279,6 +281,82 @@ jobs:
           find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) -path '*/qmodem/*' -print -exec cp -f {} ../qmodem-packages/ \;
           ls -lah ../qmodem-packages
 
+      - name: Build LPAC packages without ModemManager
+        working-directory: build/sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! grep -q '^src-git 0xygen_aio ' feeds.conf.default; then
+            printf '\nsrc-git 0xygen_aio %s;%s\n' "$OXYGEN_AIO_FEED_URL" "$OXYGEN_AIO_REF" >> feeds.conf.default
+          fi
+          ./scripts/feeds update -a
+
+          lpac_makefile="feeds/0xygen_aio/lpac/Makefile"
+          if [[ ! -f "$lpac_makefile" ]]; then
+            echo "::error::LPAC Makefile was not found at $lpac_makefile"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          makefile = Path("feeds/0xygen_aio/lpac/Makefile")
+          lines = makefile.read_text().splitlines()
+          patched = []
+
+          for line in lines:
+              if "+modemmanager" in line.lower():
+                  if patched and patched[-1].rstrip().endswith("\\"):
+                      patched[-1] = patched[-1].rstrip()[:-1].rstrip()
+                  continue
+              patched.append(line)
+
+          makefile.write_text("\n".join(patched) + "\n")
+          PY
+          if grep -qi 'modemmanager' "$lpac_makefile"; then
+            echo "::error::ModemManager dependency is still present in $lpac_makefile"
+            exit 1
+          fi
+
+          ./scripts/feeds install -f -p 0xygen_aio lpac luci-app-lpac-manager 0xygen-aio
+          ./scripts/feeds install \
+            libmbim mbim-utils \
+            libcurl curl ca-certificates ca-bundle \
+            jq luci-base luci-compat luci-lua-runtime
+
+          {
+            echo "CONFIG_PACKAGE_lpac=m"
+            echo "CONFIG_LPAC_WITH_AT=y"
+            echo "CONFIG_LPAC_WITH_MBIM=y"
+            echo "CONFIG_LPAC_WITH_PCSC=n"
+            echo "CONFIG_LPAC_WITH_UQMI=n"
+            echo "CONFIG_PACKAGE_luci-app-lpac-manager=m"
+            echo "CONFIG_PACKAGE_0xygen-aio=m"
+            echo "# CONFIG_PACKAGE_modemmanager is not set"
+            echo "# CONFIG_PACKAGE_luci-proto-modemmanager is not set"
+          } >> .config
+
+          make defconfig V=s
+
+          for pkg_dir in lpac luci-app-lpac-manager 0xygen-aio; do
+            echo "Building ${pkg_dir} without ModemManager"
+            make "package/feeds/0xygen_aio/${pkg_dir}/compile" -j"$(nproc)" V=s || make "package/feeds/0xygen_aio/${pkg_dir}/compile" -j1 V=s
+          done
+
+          mkdir -p ../lpac-packages
+          find bin/packages -type f \( \
+            -name 'lpac-*.apk' -o -name 'lpac_*.ipk' \
+            -o -name 'luci-app-lpac-manager-*.apk' -o -name 'luci-app-lpac-manager_*.ipk' \
+            -o -name '0xygen-aio-*.apk' -o -name '0xygen-aio_*.ipk' \
+          \) -print -exec cp -f {} ../lpac-packages/ \;
+          ls -lah ../lpac-packages
+
+          if find ../lpac-packages -type f -iname '*modemmanager*' | grep -q .; then
+            echo "::error::Unexpected ModemManager package found in LPAC output"
+            exit 1
+          fi
+
       - name: Build firmware image with ImageBuilder
         working-directory: build/imagebuilder
         shell: bash
@@ -293,6 +371,13 @@ jobs:
           fi
           if compgen -G "$GITHUB_WORKSPACE/packages/prebuilt/*.ipk" > /dev/null; then
             cp -vf "$GITHUB_WORKSPACE"/packages/prebuilt/*.ipk packages/
+          fi
+
+          if [[ -d ../lpac-packages ]]; then
+            rm -f packages/lpac-*.apk packages/lpac_*.ipk
+            rm -f packages/luci-app-lpac-manager-*.apk packages/luci-app-lpac-manager_*.ipk
+            rm -f packages/0xygen-aio-*.apk packages/0xygen-aio_*.ipk
+            cp -vf ../lpac-packages/* packages/
           fi
 
           if [[ -d ../../files ]]; then
@@ -333,11 +418,35 @@ jobs:
           fi
 
           esim_packages="lpac luci-app-lpac-manager 0xygen-aio atinout luci-compat luci-lua-runtime libmbim mbim-utils libqmi uqmi jq coreutils-timeout libcurl4 curl ca-bundle ca-certificates"
-          packages="luci ${qmodem_packages} ${esim_packages} kmod-usb-net-cdc-mbim kmod-usb-serial-option kmod-usb-serial-qualcomm usbutils picocom"
+          blocked_packages="-modemmanager -luci-proto-modemmanager"
+          packages="luci ${qmodem_packages} ${esim_packages} ${blocked_packages} kmod-usb-net-cdc-mbim kmod-usb-serial-option kmod-usb-serial-qualcomm usbutils picocom"
 
           echo "Building ImageBuilder profile ${OPENWRT_PROFILE}"
           echo "Packages: ${packages}"
           make image PROFILE="${OPENWRT_PROFILE}" PACKAGES="${packages}" FILES="files/" V=s
+
+          manifest="$(find "bin/targets/${OPENWRT_TARGET_PATH}" -maxdepth 1 -type f -name "*${OPENWRT_PROFILE}*.manifest" | head -n1 || true)"
+          if [[ -z "$manifest" ]]; then
+            echo "::error::Firmware package manifest was not produced"
+            exit 1
+          fi
+          if ! grep -Eq '^lpac[[:space:]-]' "$manifest"; then
+            echo "::error::lpac is missing from the firmware manifest"
+            cat "$manifest"
+            exit 1
+          fi
+          if ! grep -Eq '^luci-app-lpac-manager[[:space:]-]' "$manifest"; then
+            echo "::error::luci-app-lpac-manager is missing from the firmware manifest"
+            cat "$manifest"
+            exit 1
+          fi
+          if grep -Eq '^(modemmanager|luci-proto-modemmanager)[[:space:]-]' "$manifest"; then
+            echo "::error::ModemManager package unexpectedly entered the firmware manifest"
+            grep -Ei 'modemmanager|lpac' "$manifest" || true
+            exit 1
+          fi
+          echo "LPAC/ModemManager manifest validation passed:"
+          grep -E '^(lpac|luci-app-lpac-manager|0xygen-aio)[[:space:]-]' "$manifest" || true
 
       - name: Collect artifacts
         shell: bash
@@ -367,6 +476,7 @@ jobs:
             echo "Builder: OpenWrt SDK + ImageBuilder"
             echo "eSIM stack: lpac, luci-app-lpac-manager, 0xygen-aio, Telegram bot, HYFE IMAP helpers, Ookla speedtest"
             echo "LPAC defaults: MBIM /dev/cdc-wdm0, mbim-proxy=1, mbim-skip-slot=1, AT /dev/ttyUSB2, modem_iface=1_1"
+            echo "ModemManager: excluded; QModem owns MBIM /dev/cdc-wdm0 and wwan0"
           } > firmware/build-info.txt
 
       - name: Upload firmware artifact

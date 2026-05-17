@@ -1,0 +1,17 @@
+{
+  "luci-app-lpac-esim": {
+    "description": "LuCI WebUI for eSIM management via lpac-esim backend",
+    "read": {
+      "uci": ["lpac-esim"],
+      "file": {
+        "/usr/bin/lpac-esim": ["exec"],
+        "/usr/bin/lpac": ["exec"],
+        "/usr/sbin/qmicli": ["exec"],
+        "/sbin/logread": ["exec"]
+      }
+    },
+    "write": {
+      "uci": ["lpac-esim"]
+    }
+  }
+}

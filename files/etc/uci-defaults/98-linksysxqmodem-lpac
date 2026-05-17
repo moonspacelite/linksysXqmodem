@@ -14,6 +14,16 @@ ensure_lpac_option() {
 
 log "initializing LPAC defaults"
 
+for svc in modemmanager ModemManager; do
+	if [ -x "/etc/init.d/${svc}" ]; then
+		"/etc/init.d/${svc}" stop >/dev/null 2>&1 || true
+		"/etc/init.d/${svc}" disable >/dev/null 2>&1 || true
+	fi
+done
+killall ModemManager mmcli 2>/dev/null || true
+rm -f /etc/rc.d/S*modemmanager /etc/rc.d/K*modemmanager /etc/rc.d/S*ModemManager /etc/rc.d/K*ModemManager 2>/dev/null || true
+log "ModemManager disabled; QModem owns MBIM"
+
 uci -q get lpac-esim.main >/dev/null 2>&1 || uci -q set lpac-esim.main='lpac-esim'
 
 ensure_lpac_option apdu_backend 'mbim'

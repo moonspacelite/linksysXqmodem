@@ -5,7 +5,7 @@
 # License: GPL-2.0
 #
 # Changelog:
-#   3.0.0 - Safe profile switch (ifdown/disconnect MM/enable/wait/ifup),
+#   3.0.0 - Safe profile switch (ifdown/enable/wait/ifup),
 #           separate disable API, AT Terminal multi-fallback
 #           (atinout/sms_tool/microcom/socat/raw serial),
 #           modem_iface config, version consistency fix
@@ -191,7 +191,7 @@ check_required_tools() {
     JQ_BIN="$(check_cmd jq)";       [ -n "$JQ_BIN" ]      && ok "jq found: $JQ_BIN"       || die "jq not found in PATH"
     QMICLI_BIN="$(check_cmd qmicli)"; [ -n "$QMICLI_BIN" ] && ok "qmicli found: $QMICLI_BIN" || warn "qmicli not found"
     MBIMCLI_BIN="$(check_cmd mbimcli)"; [ -n "$MBIMCLI_BIN" ] && ok "mbimcli found: $MBIMCLI_BIN" || warn "mbimcli not found"
-    MMCLI_BIN="$(check_cmd mmcli)"; [ -n "$MMCLI_BIN" ]   && ok "mmcli found: $MMCLI_BIN" || warn "mmcli not found"
+    MMCLI_BIN="$(check_cmd mmcli)"; [ -n "$MMCLI_BIN" ] && warn "mmcli found, but QModem owns MBIM in this firmware" || ok "ModemManager/mmcli intentionally absent"
     TIMEOUT_BIN="$(check_cmd timeout)"; [ -n "$TIMEOUT_BIN" ] || log_verbose "Native timeout not found, using shell wrapper."
 }
 
@@ -410,7 +410,12 @@ mm_field() {
 }
 
 print_modem_status() {
-    [ -n "$MMCLI_BIN" ] || { warn "mmcli not available"; return 1; }
+    if [ -z "$MMCLI_BIN" ]; then
+        hr
+        info "QModem MBIM Status (ModemManager disabled)"
+        ubus call "network.interface.${MODEM_IFACE}" status 2>/dev/null || warn "Unable to read network.interface.${MODEM_IFACE}"
+        return 0
+    fi
     idx="$(detect_modem_index)"; [ -n "$idx" ] || { warn "No modem detected via mmcli -L"; return 1; }
     out="${TMP_DIR}/mmcli-modem-${idx}.txt"
     "$MMCLI_BIN" -m "$idx" > "$out" 2>/dev/null || { fail "Failed to read modem details"; return 1; }
@@ -457,11 +462,7 @@ monitor_modem_status() {
 ###############################################################################
 
 disconnect_modemmanager() {
-    [ -n "$MMCLI_BIN" ] || return 0
-    "$MMCLI_BIN" -L 2>/dev/null | sed -n 's|.*/Modem/\([0-9][0-9]*\).*|\1|p' | while read -r modem_id; do
-        [ -n "$modem_id" ] || continue
-        "$MMCLI_BIN" -m "$modem_id" --simple-disconnect >/dev/null 2>&1 || true
-    done
+    return 0
 }
 
 notif_clear_queue() {
@@ -613,12 +614,13 @@ switch_profile() {
 
     syslog_msg "Initiating Safe Profile Switch to: $target_nick ($target_iccid)"
 
-    # Safe switch: ifdown → disconnect MM → enable with refreshflag → wait → ifup
+    # Safe switch: ifdown -> enable with refreshflag -> wait -> ifup.
+    # QModem owns the MBIM data session in this firmware; ModemManager is not used.
     step "Bringing down interface $MODEM_IFACE..."
     ifdown "$MODEM_IFACE" >/dev/null 2>&1 || true
     sleep 2
 
-    step "Disconnecting ModemManager bearers..."
+    step "Keeping MBIM ownership with QModem..."
     disconnect_modemmanager
     sleep 2
 
@@ -800,11 +802,14 @@ api_notif_clear() {
     fi
 }
 
-# GET modem-status — parse mmcli text output, return as JSON
+# GET modem-status
 api_modem_status() {
     if [ -z "$MMCLI_BIN" ]; then
-        api_err "no_mmcli" "mmcli binary not available on this system"
-        return 1
+        data="$("$JQ_BIN" -nc --arg iface "$MODEM_IFACE" \
+            '{"available":false,"owner":"qmodem","state":"modemmanager_disabled","interface":$iface}' 2>/dev/null \
+            || printf '{"available":false,"owner":"qmodem","state":"modemmanager_disabled"}')"
+        api_ok "$data" "qmodem_mbim"
+        return 0
     fi
     idx="$(detect_modem_index)"
     if [ -z "$idx" ]; then

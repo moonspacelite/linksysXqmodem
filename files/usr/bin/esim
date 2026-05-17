@@ -845,11 +845,7 @@ select_profile() {
 # ─── Modem helpers ────────────────────────────────────────────────────────────
 
 disconnect_modemmanager() {
-        if ! command -v mmcli >/dev/null 2>&1; then return 0; fi
-        mmcli -L 2>/dev/null | sed -n 's#.*Modem/\([0-9][0-9]*\).*#\1#p' | while read -r modem_id; do
-                [ -n "$modem_id" ] || continue
-                mmcli -m "$modem_id" --simple-disconnect >/dev/null 2>&1
-        done
+        return 0
 }
 
 safe_switch_profile() {
@@ -858,7 +854,7 @@ safe_switch_profile() {
         section_header "SAFE SWITCH PROFILE" "$BYELLOW"
         printf '\n'
         kv_row "Langkah 1" "ifdown $NETIFD_IFACE" "$CYAN" "$WHITE"
-        kv_row "Langkah 2" "Disconnect bearer ModemManager" "$CYAN" "$WHITE"
+        kv_row "Langkah 2" "QModem keeps MBIM ownership" "$CYAN" "$WHITE"
         kv_row "Langkah 3" "Enable profile (refreshflag=$SWITCH_REFRESH_FLAG)" "$CYAN" "$WHITE"
         kv_row "Langkah 4" "ifup $NETIFD_IFACE" "$CYAN" "$WHITE"
         printf '\n  %bTarget ICCID : %b%s%b\n' "$CYAN" "$BOLD$BYELLOW" "$iccid" "$RESET"
@@ -871,7 +867,7 @@ safe_switch_profile() {
         ifdown "$NETIFD_IFACE" >/dev/null 2>&1
         sleep 2
 
-        printf '  %b⊗%b  Disconnect bearer ModemManager...\n' "$BRED" "$RESET"
+        printf '  %b⊗%b  ModemManager disabled; MBIM stays owned by QModem...\n' "$BRED" "$RESET"
         disconnect_modemmanager
         sleep 2
 
@@ -886,9 +882,7 @@ safe_switch_profile() {
         ifup "$NETIFD_IFACE" >/dev/null 2>&1
 
         printf '\n  %b✔%b  Selesai. Jika SIM missing, jalankan menu Recovery.\n' "$BGREEN$BOLD" "$RESET"
-        if command -v mmcli >/dev/null 2>&1; then
-                mmcli -L 2>/dev/null
-        fi
+        ubus call "network.interface.${NETIFD_IFACE}" status 2>/dev/null || true
 }
 
 # ─── USB recovery ─────────────────────────────────────────────────────────────
@@ -927,7 +921,6 @@ recover_sim_missing() {
         printf '\n  %b↓%b  Menurunkan interface...\n' "$BYELLOW" "$RESET"
         ifdown "$NETIFD_IFACE" >/dev/null 2>&1
         disconnect_modemmanager
-        /etc/init.d/modemmanager stop >/dev/null 2>&1
         sleep 2
 
         if [ -w "/sys/bus/usb/devices/$usb_dev/authorized" ]; then
@@ -944,15 +937,14 @@ recover_sim_missing() {
         fi
 
         sleep 8
-        printf '  %b▶%b  Memulai ModemManager...\n' "$BCYAN" "$RESET"
-        /etc/init.d/modemmanager start >/dev/null 2>&1
+        printf '  %b▶%b  Menunggu modem siap kembali tanpa ModemManager...\n' "$BCYAN" "$RESET"
         sleep 8
         printf '  %b↑%b  Menaikkan interface...\n' "$BGREEN" "$RESET"
         ifup "$NETIFD_IFACE" >/dev/null 2>&1
 
         section_header "STATUS SETELAH RECOVERY" "$BGREEN"
         lsusb 2>/dev/null | grep '2cb7:0007'
-        mmcli -L 2>/dev/null
+        ubus call "network.interface.${NETIFD_IFACE}" status 2>/dev/null || true
         json="$(run_lpac_capture chip info)"
         show_lpac_summary "CHIP INFO" "$json"
 }
