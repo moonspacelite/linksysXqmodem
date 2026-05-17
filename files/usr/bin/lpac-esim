@@ -107,14 +107,21 @@ title() { hr; say "  $APP_NAME v$APP_VER"; hr; }
 
 run_with_timeout() {
     t_sec=$1; shift
-    if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$t_sec" "$@"; return $?; fi
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" "$t_sec" "$@"
+        ret=$?
+        case "$ret" in
+            124|137|143) killall -9 lpac lpac.real 2>/dev/null ;;
+        esac
+        return "$ret"
+    fi
     ( "$@" ) >/dev/null 2>&1 &
     pid=$!; count=0
     while [ "$count" -lt "$t_sec" ]; do
         if ! kill -0 "$pid" 2>/dev/null; then wait "$pid" 2>/dev/null; return $?; fi
         sleep 1; count=$((count + 1))
     done
-    kill -9 "$pid" 2>/dev/null; killall -9 lpac 2>/dev/null; wait "$pid" 2>/dev/null
+    kill -9 "$pid" 2>/dev/null; killall -9 lpac lpac.real 2>/dev/null; wait "$pid" 2>/dev/null
     return 124
 }
 
@@ -165,7 +172,7 @@ parse_args() {
 check_cmd() { command -v "$1" 2>/dev/null; }
 
 find_lpac_bin() {
-    for _lpac in /usr/bin/lpac.real /usr/libexec/lpac /usr/bin/lpac; do
+    for _lpac in /usr/libexec/lpac.real /usr/bin/lpac.real /usr/libexec/lpac /usr/bin/lpac; do
         [ -x "$_lpac" ] && { printf '%s\n' "$_lpac"; return 0; }
     done
     check_cmd lpac

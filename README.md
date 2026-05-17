@@ -18,6 +18,10 @@ Packages** dulu:
 Workflow ini akan compile QModem sekali, upload artifact paket, lalu commit
 paketnya ke `packages/qmodem/<versi>/<ui>/`. Setelah itu workflow firmware
 bisa memakai paket prebuilt tersebut tanpa compile QModem ulang.
+Prebuilt QModem hanya dipakai kalau `build-info.txt` cocok dengan OpenWrt
+version, QModem ref, UI, dan hash semua patch di `patches/qmodem/*.patch`.
+Kalau patch lokal berubah, workflow firmware otomatis fallback compile QModem
+dari source agar paket lama tidak diam-diam masuk firmware.
 
 Di workflow firmware, opsi `qmodem_package_mode` tersedia:
 
@@ -125,6 +129,11 @@ Firmware ini sengaja tidak memasukkan `modemmanager` atau
 `luci-proto-modemmanager`. QModem menjadi satu-satunya pemilik koneksi MBIM
 `/dev/cdc-wdm0` dan `wwan0`, sedangkan LPAC hanya memakai akses MBIM proxy
 untuk manajemen eSIM.
+
+Di firmware yang benar, `logread` saat dial Foxconn/T99W175 akan memuat
+`Foxconn MBIM: using mbim-network proxy on /dev/cdc-wdm0`. Kalau baris ini
+tidak ada, QModem yang terpasang masih paket lama dan belum memakai patch MBIM
+proxy.
 
 ## Catatan penting EA6350v3
 

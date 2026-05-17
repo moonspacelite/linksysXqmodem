@@ -73,6 +73,19 @@ uci -q get lpac.at >/dev/null 2>&1 || uci -q set lpac.at='at'
 uci -q set lpac.at.device='/dev/ttyUSB2'
 uci -q commit lpac
 
+if [ -x /usr/sbin/lpac ] && [ -x /usr/bin/lpac ]; then
+	bin_lpac="$(readlink -f /usr/bin/lpac 2>/dev/null || printf '%s\n' /usr/bin/lpac)"
+	shim_lpac="$(readlink -f /usr/sbin/lpac 2>/dev/null || printf '%s\n' /usr/sbin/lpac)"
+	if [ "$bin_lpac" != "$shim_lpac" ]; then
+		mkdir -p /usr/libexec
+		cp -f /usr/bin/lpac /usr/libexec/lpac.real
+		chmod 0755 /usr/libexec/lpac.real
+		cp -f /usr/sbin/lpac /usr/bin/lpac
+		chmod 0755 /usr/bin/lpac
+		log "installed QModem-safe lpac shim at /usr/bin/lpac"
+	fi
+fi
+
 if [ -x /usr/libexec/mbim-proxy ]; then
 	log "mbim-proxy present at /usr/libexec/mbim-proxy"
 else

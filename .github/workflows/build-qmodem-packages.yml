@@ -73,11 +73,17 @@ jobs:
             exit 1
           fi
 
+          qmodem_patch_hash="none"
+          if compgen -G "$GITHUB_WORKSPACE/patches/qmodem/*.patch" >/dev/null; then
+            qmodem_patch_hash="$(sha256sum "$GITHUB_WORKSPACE"/patches/qmodem/*.patch | LC_ALL=C sort -k2 | sha256sum | awk '{print $1}')"
+          fi
+
           artifact_name="qmodem-${version}-ea6350v3-${{ inputs.qmodem_ui }}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "base_url=${base_url}" >> "$GITHUB_OUTPUT"
           echo "sdk_url=${base_url}/${sdk}" >> "$GITHUB_OUTPUT"
           echo "qmodem_ref=${qmodem_ref}" >> "$GITHUB_OUTPUT"
+          echo "qmodem_patch_hash=${qmodem_patch_hash}" >> "$GITHUB_OUTPUT"
           echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
@@ -204,6 +210,7 @@ jobs:
           {
             echo "OpenWrt version: ${{ steps.inputs.outputs.version }}"
             echo "QModem ref: ${{ steps.inputs.outputs.qmodem_ref }}"
+            echo "QModem patch hash: ${{ steps.inputs.outputs.qmodem_patch_hash }}"
             echo "QModem UI: ${{ inputs.qmodem_ui }}"
             echo "Target: Linksys EA6350v3 / ${OPENWRT_TARGET_PATH} / ${OPENWRT_ARCH_LABEL}"
             echo "Built by: Build QModem Packages workflow"

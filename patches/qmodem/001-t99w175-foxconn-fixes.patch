@@ -50,7 +50,7 @@ diff --git a/application/qmodem/files/usr/share/qmodem/modem_dial.sh b/applicati
 index 4bfee27..47b6dd8 100755
 --- a/application/qmodem/files/usr/share/qmodem/modem_dial.sh
 +++ b/application/qmodem/files/usr/share/qmodem/modem_dial.sh
-@@ -11,0 +12,86 @@ source "${SCRIPT_DIR}/generic.sh"
+@@ -11,0 +12,87 @@ source "${SCRIPT_DIR}/generic.sh"
 +LPAC_ACTIVE_FILE="/tmp/lpac-esim/lpac.active"
 +
 +lpac_esim_active()
@@ -102,6 +102,7 @@ index 4bfee27..47b6dd8 100755
 +    mbim_port="$(qmodem_mbim_port)"
 +    [ -n "$mbim_port" ] || return 1
 +    command -v mbim-network >/dev/null 2>&1 || return 1
++    logger -t qmodem_network "Foxconn MBIM: using mbim-network proxy on ${mbim_port}"
 +
 +    profile="${MODEM_RUNDIR}/${modem_config}_dir/mbim-network.conf"
 +    qmodem_mbim_write_profile "$profile"
@@ -137,10 +138,11 @@ index 4bfee27..47b6dd8 100755
 +        fi
 +    done
 +}
-@@ -974,0 +1061,4 @@ mbim_dial(){
+@@ -974,0 +1061,5 @@ mbim_dial(){
 +    if [ "$manufacturer" = "foxconn" ]; then
 +        qmodem_mbim_network_dial && return 0
 +        m_debug "mbim-network unavailable for Foxconn; falling back to legacy qmi_dial"
++        logger -t qmodem_network "Foxconn MBIM: mbim-network unavailable; falling back to legacy dial"
 +    fi
 @@ -1496,0 +1587,5 @@ at_dial_monitor()
 +        if lpac_esim_active; then
