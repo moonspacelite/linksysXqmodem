@@ -147,7 +147,7 @@ jobs:
           } >> .config
 
           if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
-            packages=(
+            install_packages=(
               ubus-at-daemon
               tom_modem
               sms-tool_q
@@ -156,8 +156,17 @@ jobs:
               qmodem
               luci-app-qmodem-next
             )
+            compile_dirs=(
+              ubus_at_daemon
+              tom_modem
+              sms-tool_q
+              sms_forwarder_next
+              quectel_CM_5G_M
+              qmodem
+              luci-app-qmodem-next
+            )
           else
-            packages=(
+            install_packages=(
               ubus-at-daemon
               tom_modem
               sms-tool_q
@@ -169,14 +178,26 @@ jobs:
               luci-app-qmodem-mwan
               luci-app-qmodem-ttlfw4
             )
+            compile_dirs=(
+              ubus_at_daemon
+              tom_modem
+              sms-tool_q
+              sms_forwarder
+              quectel_CM_5G_M
+              qmodem
+              luci-app-qmodem
+              luci-app-qmodem-sms
+              luci-app-qmodem-mwan
+              luci-app-qmodem-ttlfw4
+            )
           fi
 
-          ./scripts/feeds install -f "${packages[@]}"
+          ./scripts/feeds install -f "${install_packages[@]}"
           make defconfig V=s
 
-          for pkg in "${packages[@]}"; do
-            echo "Building ${pkg}"
-            make "package/feeds/qmodem/${pkg}/compile" -j"$(nproc)" V=s || make "package/feeds/qmodem/${pkg}/compile" -j1 V=s
+          for pkg_dir in "${compile_dirs[@]}"; do
+            echo "Building ${pkg_dir}"
+            make "package/feeds/qmodem/${pkg_dir}/compile" -j"$(nproc)" V=s || make "package/feeds/qmodem/${pkg_dir}/compile" -j1 V=s
           done
 
           mkdir -p ../qmodem-packages
