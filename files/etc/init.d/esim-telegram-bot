@@ -1,0 +1,50 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+SERVICE_BIN="/usr/bin/esim-telegram-bot"
+
+enabled_in_uci() {
+	[ "$(uci -q get lpac-esim.main.telegram_enabled 2>/dev/null)" = "1" ]
+}
+
+has_token() {
+	[ -n "$(uci -q get lpac-esim.main.telegram_bot_token 2>/dev/null)" ]
+}
+
+start_service() {
+	enabled_in_uci || return 0
+	has_token || {
+		logger -t esim-telegram-bot "not starting: telegram_bot_token is empty"
+		return 0
+	}
+	[ -x "$SERVICE_BIN" ] || {
+		logger -t esim-telegram-bot "not starting: $SERVICE_BIN missing"
+		return 0
+	}
+
+	procd_open_instance
+	procd_set_param command "$SERVICE_BIN"
+	# respawn <threshold> <timeout> <retry>
+	#   - threshold 3600s: respawn budget window
+	#   - timeout 5s: gap between respawns
+	#   - retry 0: never give up.  The default `5` was too aggressive while
+	#     the user was configuring the token via LuCI: a handful of fast
+	#     exits (invalid token / no DNS yet) would push procd over the limit
+	#     and the bot would silently stay dead until the next reboot.
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "lpac-esim"
+}
+
+reload_service() {
+	stop
+	start
+}

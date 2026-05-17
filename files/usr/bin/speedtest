@@ -1,0 +1,8 @@
+#!/bin/sh
+# Thin wrapper around the Ookla Speedtest CLI binary.
+#
+# We ship the binary at /usr/libexec/ookla-speedtest and expose it via this
+# wrapper so the first run does not prompt for the EULA / GDPR notice when
+# scripted from cron, LuCI, or interactively. Users can still pass any
+# additional speedtest flags; they will be appended after our defaults.
+exec /usr/libexec/ookla-speedtest --accept-license --accept-gdpr "$@"

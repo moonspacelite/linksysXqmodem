@@ -1,0 +1,924 @@
+/* lpac-esim.css — v3.1.0 (0xygen-Linksys: modern mobile-first redesign)
+ *
+ * Drop-in CSS replacement for luci-app-lpac-manager. Preserves 100% of
+ * existing IDs, classes, and DOM structure — restyles only.
+ *
+ * Goals:
+ *   • Mobile-first responsive grid (no overlapping at 320px+)
+ *   • Card-style fieldsets with shadow, gradient accents, rounded corners
+ *   • Tables that morph into card stacks on narrow viewports (≤640px)
+ *   • Touch-friendly buttons/inputs (min-height 42px)
+ *   • Automatic light/dark via prefers-color-scheme
+ *   • Theme-agnostic: scoped to .lpac-app so it doesn't bleed into LuCI
+ *   • Compatible with LuCI Material + Bootstrap themes
+ *
+ * Scope: all rules live under .lpac-app (which wraps the entire page).
+ */
+
+/* ============================================================
+ * 1.  CSS variables — light & dark palette
+ * ============================================================ */
+:root {
+  --lpac-bg-page:        transparent;
+  --lpac-bg-card:        #ffffff;
+  --lpac-bg-card-soft:   #f8fafc;
+  --lpac-bg-input:       #ffffff;
+  --lpac-bg-banner:      #ffffff;
+  --lpac-fg:             #0f172a;
+  --lpac-fg-soft:        #475569;
+  --lpac-fg-muted:       #94a3b8;
+  --lpac-border:         #e2e8f0;
+  --lpac-border-strong:  #cbd5e1;
+  --lpac-shadow-sm:      0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --lpac-shadow-md:      0 4px 12px rgba(15, 23, 42, 0.06), 0 2px 4px rgba(15, 23, 42, 0.04);
+  --lpac-shadow-lg:      0 10px 32px rgba(15, 23, 42, 0.08), 0 4px 12px rgba(15, 23, 42, 0.05);
+
+  --lpac-primary:        #2563eb;
+  --lpac-primary-soft:   #dbeafe;
+  --lpac-primary-text:   #1e40af;
+  --lpac-primary-hover:  #1d4ed8;
+
+  --lpac-success:        #16a34a;
+  --lpac-success-soft:   #dcfce7;
+  --lpac-success-text:   #15803d;
+  --lpac-success-strong: #166534;
+
+  --lpac-warning:        #f59e0b;
+  --lpac-warning-soft:   #fef3c7;
+  --lpac-warning-text:   #92400e;
+
+  --lpac-danger:         #dc2626;
+  --lpac-danger-soft:    #fee2e2;
+  --lpac-danger-text:    #991b1b;
+
+  --lpac-info:           #0891b2;
+  --lpac-info-soft:      #cffafe;
+  --lpac-info-text:      #155e75;
+
+  --lpac-accent-grad:    linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+  --lpac-radius-sm:      6px;
+  --lpac-radius:         10px;
+  --lpac-radius-lg:      14px;
+  --lpac-radius-pill:    999px;
+  --lpac-touch:          42px;
+
+  --lpac-font:           'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --lpac-mono:           'JetBrains Mono', 'SF Mono', 'Cascadia Code', Consolas, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --lpac-bg-page:        transparent;
+    --lpac-bg-card:        #111827;
+    --lpac-bg-card-soft:   #0f172a;
+    --lpac-bg-input:       #1e293b;
+    --lpac-bg-banner:      #111827;
+    --lpac-fg:             #f1f5f9;
+    --lpac-fg-soft:        #cbd5e1;
+    --lpac-fg-muted:       #64748b;
+    --lpac-border:         #1e293b;
+    --lpac-border-strong:  #334155;
+    --lpac-shadow-sm:      0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.4);
+    --lpac-shadow-md:      0 4px 12px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.25);
+    --lpac-shadow-lg:      0 10px 32px rgba(0, 0, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.3);
+
+    --lpac-primary:        #3b82f6;
+    --lpac-primary-soft:   rgba(59, 130, 246, 0.15);
+    --lpac-primary-text:   #93c5fd;
+    --lpac-primary-hover:  #60a5fa;
+
+    --lpac-success:        #22c55e;
+    --lpac-success-soft:   rgba(34, 197, 94, 0.15);
+    --lpac-success-text:   #86efac;
+    --lpac-success-strong: #4ade80;
+
+    --lpac-warning:        #fbbf24;
+    --lpac-warning-soft:   rgba(251, 191, 36, 0.15);
+    --lpac-warning-text:   #fcd34d;
+
+    --lpac-danger:         #ef4444;
+    --lpac-danger-soft:    rgba(239, 68, 68, 0.15);
+    --lpac-danger-text:    #fca5a5;
+
+    --lpac-info:           #22d3ee;
+    --lpac-info-soft:      rgba(34, 211, 238, 0.15);
+    --lpac-info-text:      #67e8f9;
+  }
+}
+
+[data-theme="dark"] .lpac-app,
+[data-bs-theme="dark"] .lpac-app,
+[data-darkmode="true"] .lpac-app,
+.dark .lpac-app {
+  --lpac-bg-card:        #111827;
+  --lpac-bg-card-soft:   #0f172a;
+  --lpac-bg-input:       #1e293b;
+  --lpac-bg-banner:      #111827;
+  --lpac-fg:             #f1f5f9;
+  --lpac-fg-soft:        #cbd5e1;
+  --lpac-fg-muted:       #94a3b8;
+  --lpac-border:         #1e293b;
+  --lpac-border-strong:  #334155;
+  --lpac-primary-text:   #93c5fd;
+  --lpac-primary-hover:  #60a5fa;
+}
+
+/* ============================================================
+ * 2.  Root container & headline
+ * ============================================================ */
+.lpac-app {
+  font-family: var(--lpac-font);
+  color: var(--lpac-fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.lpac-app h2[name="content"] {
+  font-size: clamp(20px, 4vw, 28px);
+  font-weight: 700;
+  margin: 8px 0 4px;
+  letter-spacing: -0.02em;
+  background: var(--lpac-accent-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.lpac-app h2[name="content"] #esim-app-version {
+  font-size: 0.55em;
+  font-weight: 500;
+  letter-spacing: 0;
+  padding: 3px 10px;
+  border-radius: var(--lpac-radius-pill);
+  background: var(--lpac-primary-soft);
+  color: var(--lpac-primary-text);
+  -webkit-text-fill-color: currentColor;
+  opacity: 1;
+}
+
+.lpac-app .cbi-map-descr {
+  color: var(--lpac-fg-soft);
+  font-size: 14px;
+  margin: 0 0 18px;
+  line-height: 1.5;
+}
+
+/* ============================================================
+ * 3.  Connectivity & lock banners
+ * ============================================================ */
+.lpac-app #esim-connectivity-banner > div,
+.lpac-app #esim-lock-banner {
+  /* The upstream template ships inline `style="…"` on every banner
+   * with hardcoded LuCI bootstrap-bs3 colors (#d4edda / #f8d7da / etc.).
+   * We can't remove those inline styles from CSS, so:
+   *
+   *   • shape (padding, radius) — !important, applies to all banners
+   *     and beats the inline value
+   *   • palette (border, background, color) — NO !important here so
+   *     the per-state palette rules below (which DO use !important) can
+   *     win the specificity battle (they have lower specificity than
+   *     this descendant rule)
+   *
+   * The per-state rules then use !important to beat the remaining inline
+   * styles. Result: shape from this rule + colors from per-state rules. */
+  display: block;
+  padding: 14px 16px 14px 48px !important;
+  border-radius: var(--lpac-radius) !important;
+  border: 1px solid transparent;
+  background: var(--lpac-bg-banner);
+  color: var(--lpac-fg);
+  box-shadow: var(--lpac-shadow-sm);
+  position: relative;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.lpac-app #esim-connectivity-banner > div::before,
+.lpac-app #esim-lock-banner::before {
+  content: '';
+  position: absolute;
+  left: 16px; top: 50%;
+  width: 20px; height: 20px;
+  transform: translateY(-50%);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
+
+.lpac-app #connectivity-online {
+  background: var(--lpac-success-soft) !important;
+  border-color: var(--lpac-success) !important;
+  color: var(--lpac-success-strong) !important;
+}
+.lpac-app #connectivity-online::before {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2316a34a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M5 12l5 5 9-11'/></svg>");
+}
+
+.lpac-app #connectivity-offline {
+  background: var(--lpac-danger-soft) !important;
+  border-color: var(--lpac-danger) !important;
+  color: var(--lpac-danger-text) !important;
+}
+.lpac-app #connectivity-offline::before {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23dc2626' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/><line x1='15' y1='9' x2='9' y2='15'/><line x1='9' y1='9' x2='15' y2='15'/></svg>");
+}
+
+.lpac-app #connectivity-checking {
+  background: var(--lpac-warning-soft) !important;
+  border-color: var(--lpac-warning) !important;
+  color: var(--lpac-warning-text) !important;
+}
+.lpac-app #connectivity-checking::before {
+  width: 16px; height: 16px;
+  border: 2px solid rgba(245, 158, 11, 0.25);
+  border-top-color: var(--lpac-warning);
+  border-radius: 50%;
+  animation: lpac-spin 0.8s linear infinite;
+  background: transparent;
+}
+
+@keyframes lpac-spin {
+  to { transform: translateY(-50%) rotate(360deg); }
+}
+
+.lpac-app #esim-lock-banner {
+  background: var(--lpac-info-soft) !important;
+  border-color: var(--lpac-info) !important;
+  color: var(--lpac-info-text) !important;
+}
+.lpac-app #esim-lock-banner::before {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230891b2' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/><polyline points='12 6 12 12 16 14'/></svg>");
+}
+
+/* ============================================================
+ * 4.  Tab bar — sticky, horizontal scroll on mobile
+ * ============================================================ */
+.lpac-app .cbi-tabmenu {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  /* Sticky needs an opaque background so content scrolling under it is
+   * not visible through the bar. Use the page card background. A subtle
+   * blur (where supported) keeps the modern feel without losing
+   * readability. */
+  background: var(--lpac-bg-card);
+  -webkit-backdrop-filter: saturate(180%) blur(10px);
+  backdrop-filter: saturate(180%) blur(10px);
+  margin: 0 -4px 18px;
+  padding: 6px 4px;
+  background-image: none !important;
+}
+
+.lpac-app .cbi-tabmenu ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  border-bottom: none !important;
+  background: none !important;
+  background-image: none !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.lpac-app .cbi-tabmenu ul::-webkit-scrollbar { height: 0; display: none; }
+
+.lpac-app .cbi-tabmenu li { margin: 0; flex: 0 0 auto; }
+.lpac-app .cbi-tabmenu li a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 18px;
+  min-height: var(--lpac-touch);
+  text-decoration: none !important;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--lpac-primary-text);
+  background: var(--lpac-primary-soft);
+  border: 1px solid transparent;
+  border-radius: var(--lpac-radius-pill);
+  white-space: nowrap;
+  transition: background-color .15s ease, color .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+.lpac-app .cbi-tabmenu li a:hover {
+  color: var(--lpac-primary-hover);
+  background: var(--lpac-primary-soft);
+  filter: brightness(0.96);
+}
+.lpac-app .cbi-tabmenu li.cbi-tab-active a {
+  color: #ffffff !important;
+  background: var(--lpac-primary) !important;
+  background-image: linear-gradient(135deg, var(--lpac-primary) 0%, #6366f1 100%) !important;
+  border-color: transparent !important;
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+ * 5.  Tab content reveal
+ * ============================================================ */
+.lpac-app .cbi-tabcontent { display: none; }
+.lpac-app .cbi-tabcontent.cbi-tabcontent-active { display: block !important; }
+
+/* ============================================================
+ * 6.  Fieldset / card
+ * ============================================================ */
+.lpac-app fieldset.cbi-section {
+  margin: 0 0 18px;
+  border: 1px solid var(--lpac-border);
+  border-radius: var(--lpac-radius-lg);
+  padding: 18px 20px;
+  background: var(--lpac-bg-card);
+  box-shadow: var(--lpac-shadow-sm);
+}
+.lpac-app fieldset.cbi-section legend {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  padding: 4px 12px;
+  margin-left: -4px;
+  color: var(--lpac-fg);
+  background: var(--lpac-bg-card);
+  border: 1px solid var(--lpac-border);
+  border-radius: var(--lpac-radius-pill);
+}
+
+/* ============================================================
+ * 7.  Info tab — KV grid (table-as-grid responsive)
+ * ============================================================ */
+.lpac-app .esim-kv {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.lpac-app .esim-kv tbody { display: contents; }
+.lpac-app .esim-kv tr {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 12px 14px;
+  background: var(--lpac-bg-card-soft);
+  border: 1px solid var(--lpac-border);
+  border-radius: var(--lpac-radius);
+  transition: background .15s, border-color .15s;
+}
+.lpac-app .esim-kv tr:hover {
+  background: var(--lpac-primary-soft);
+  border-color: var(--lpac-border-strong);
+}
+.lpac-app .esim-kv td {
+  border: none !important;
+  padding: 0 !important;
+  text-align: left !important;
+  vertical-align: top !important;
+  width: auto !important;
+  background: transparent !important;
+}
+.lpac-app .esim-kv td:first-child {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--lpac-fg-muted);
+  margin-bottom: 4px;
+}
+.lpac-app .esim-kv td:last-child {
+  font-family: var(--lpac-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lpac-fg);
+  word-break: break-all;
+  line-height: 1.45;
+}
+
+/* ============================================================
+ * 8.  Profiles table — desktop table, mobile card stack
+ * ============================================================ */
+.lpac-app .table-responsive { overflow-x: visible; -webkit-overflow-scrolling: touch; }
+
+.lpac-app #profiles-table,
+.lpac-app #notifications-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: transparent;
+}
+.lpac-app #profiles-table thead th,
+.lpac-app #notifications-table thead th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--lpac-fg-muted);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--lpac-border) !important;
+  background: transparent;
+}
+.lpac-app #profiles-table tbody td,
+.lpac-app #notifications-table tbody td {
+  padding: 14px 12px !important;
+  vertical-align: middle !important;
+  border-bottom: 1px solid var(--lpac-border) !important;
+}
+.lpac-app #profiles-table tbody tr:last-child td,
+.lpac-app #notifications-table tbody tr:last-child td {
+  border-bottom: none !important;
+}
+.lpac-app #profiles-table tbody tr:hover,
+.lpac-app #notifications-table tbody tr:hover {
+  background: var(--lpac-bg-card-soft);
+}
+.lpac-app #profiles-table tbody td:first-child {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--lpac-fg);
+}
+.lpac-app .esim-profile-name {
+  color: var(--lpac-fg) !important;
+  -webkit-text-fill-color: currentColor !important;
+}
+.lpac-app .esim-profile-nickname {
+  color: var(--lpac-fg-soft) !important;
+  -webkit-text-fill-color: currentColor !important;
+  font-weight: 600;
+}
+.lpac-app .esim-mono {
+  font-family: var(--lpac-mono);
+  font-size: 13px;
+  color: var(--lpac-fg-soft);
+}
+
+/* Mobile: convert table rows to stacked cards using data-label */
+@media (max-width: 768px) {
+  .lpac-app #profiles-table,
+  .lpac-app #notifications-table {
+    border: 0;
+  }
+  .lpac-app #profiles-table thead,
+  .lpac-app #notifications-table thead {
+    display: none;
+  }
+  .lpac-app #profiles-table tbody,
+  .lpac-app #notifications-table tbody {
+    display: grid;
+    gap: 10px;
+  }
+  .lpac-app #profiles-table tbody tr,
+  .lpac-app #notifications-table tbody tr {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 12px;
+    padding: 14px 16px;
+    background: var(--lpac-bg-card-soft);
+    border: 1px solid var(--lpac-border) !important;
+    border-radius: var(--lpac-radius);
+  }
+  .lpac-app #profiles-table tbody tr:last-child td,
+  .lpac-app #notifications-table tbody tr:last-child td {
+    border-bottom: none !important;
+  }
+  .lpac-app #profiles-table tbody td,
+  .lpac-app #notifications-table tbody td {
+    display: contents;
+  }
+  .lpac-app #profiles-table tbody td::before,
+  .lpac-app #notifications-table tbody td::before {
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--lpac-fg-muted);
+    padding-top: 4px;
+  }
+  /* Empty data-label cell would still show label — give a fallback */
+  .lpac-app #profiles-table tbody td:not([data-label])::before,
+  .lpac-app #notifications-table tbody td:not([data-label])::before {
+    content: '';
+  }
+  /* Actions cell: span both columns full width and align buttons in a row */
+  .lpac-app #profiles-table tbody td[data-label="Actions"] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    grid-column: 1 / -1;
+    text-align: left !important;
+    padding-top: 10px;
+    border-top: 1px dashed var(--lpac-border) !important;
+    margin-top: 4px;
+  }
+  .lpac-app #profiles-table tbody td[data-label="Actions"]::before {
+    display: none;
+  }
+  .lpac-app #profiles-table tbody td[data-label="Actions"] .cbi-button {
+    flex: 1 1 auto;
+    margin: 0 !important;
+  }
+}
+
+/* ============================================================
+ * 9.  Profile state badges
+ * ============================================================ */
+.lpac-app .esim-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: var(--lpac-radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.lpac-app .esim-badge::before {
+  content: '';
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.lpac-app .esim-badge-enabled {
+  background: var(--lpac-success-soft);
+  color: var(--lpac-success-strong);
+  border: 1px solid var(--lpac-success);
+}
+.lpac-app .esim-badge-disabled {
+  background: var(--lpac-bg-card-soft);
+  color: var(--lpac-fg-muted);
+  border: 1px solid var(--lpac-border-strong);
+}
+
+/* ============================================================
+ * 10. Form fields (config + download)
+ * ============================================================ */
+.lpac-app .cbi-section-node { padding: 0; }
+.lpac-app .cbi-value {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--lpac-border);
+  margin: 0;
+}
+.lpac-app .cbi-value:last-child { border-bottom: none; }
+
+.lpac-app .cbi-value-title {
+  display: block !important;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lpac-fg);
+  line-height: 1.4;
+  padding-top: 11px;
+  min-width: 0 !important;
+}
+
+.lpac-app .cbi-value-field {
+  display: block !important;
+  min-width: 0;
+}
+
+.lpac-app .cbi-value-description {
+  font-size: 12px;
+  color: var(--lpac-fg-muted);
+  margin-top: 6px;
+  line-height: 1.5;
+  opacity: 1 !important;
+}
+
+.lpac-app .cbi-input-text,
+.lpac-app .cbi-input-select,
+.lpac-app .cbi-input-file,
+.lpac-app input[type="text"]#at-cmd-input {
+  display: block;
+  width: 100%;
+  min-width: 0 !important;
+  min-height: var(--lpac-touch);
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--lpac-fg);
+  background: var(--lpac-bg-input);
+  border: 1px solid var(--lpac-border-strong);
+  border-radius: var(--lpac-radius);
+  box-shadow: var(--lpac-shadow-sm);
+  transition: border-color .15s, box-shadow .15s;
+}
+/* Monospace for technical inputs */
+.lpac-app input#lpa-activation-code,
+.lpac-app input#cfg-custom-isd-r-aid,
+.lpac-app input#cfg-qmi-device,
+.lpac-app input#cfg-at-device,
+.lpac-app input#cfg-mbim-device,
+.lpac-app input#smdp-server,
+.lpac-app input#matching-id,
+.lpac-app input#confirmation-code,
+.lpac-app input#at-cmd-input {
+  font-family: var(--lpac-mono);
+  font-size: 13px;
+}
+.lpac-app .cbi-input-text:focus,
+.lpac-app .cbi-input-select:focus,
+.lpac-app .cbi-input-file:focus,
+.lpac-app input[type="text"]#at-cmd-input:focus {
+  outline: none;
+  border-color: var(--lpac-primary);
+  box-shadow: 0 0 0 3px var(--lpac-primary-soft);
+}
+
+.lpac-app .cbi-input-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+  padding-right: 36px;
+}
+
+.lpac-app .cbi-input-file {
+  padding: 8px 14px;
+  line-height: 1.5;
+}
+
+/* ============================================================
+ * 11. Buttons
+ * ============================================================ */
+.lpac-app .cbi-button,
+.lpac-app input.cbi-button,
+.lpac-app button.cbi-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--lpac-touch);
+  padding: 8px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--lpac-fg);
+  background: var(--lpac-bg-card);
+  border: 1px solid var(--lpac-border-strong);
+  border-radius: var(--lpac-radius);
+  cursor: pointer;
+  box-shadow: var(--lpac-shadow-sm);
+  transition: background .15s, border-color .15s, transform .1s, box-shadow .15s;
+  letter-spacing: 0.01em;
+  text-decoration: none;
+}
+.lpac-app .cbi-button:hover {
+  background: var(--lpac-bg-card-soft);
+  border-color: var(--lpac-fg-muted);
+}
+.lpac-app .cbi-button:active { transform: translateY(1px); box-shadow: none; }
+
+.lpac-app .cbi-button-apply,
+.lpac-app input.cbi-button-apply {
+  color: #ffffff;
+  background: var(--lpac-primary);
+  background-image: linear-gradient(135deg, var(--lpac-primary) 0%, #6366f1 100%);
+  border-color: var(--lpac-primary);
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+}
+.lpac-app .cbi-button-apply:hover {
+  filter: brightness(1.05);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+}
+
+.lpac-app .cbi-button-remove,
+.lpac-app input.cbi-button-remove {
+  color: #ffffff;
+  background: var(--lpac-danger);
+  background-image: linear-gradient(135deg, var(--lpac-danger) 0%, #ef4444 100%);
+  border-color: var(--lpac-danger);
+  box-shadow: 0 2px 6px rgba(220, 38, 38, 0.25);
+}
+.lpac-app .cbi-button-remove:hover {
+  filter: brightness(1.05);
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.35);
+}
+
+.lpac-app .cbi-button-reset,
+.lpac-app input.cbi-button-reset {
+  background: var(--lpac-bg-card);
+  color: var(--lpac-fg);
+}
+
+/* ============================================================
+ * 12. Action bar (Save & Apply, Refresh, Reboot Modem, etc.)
+ * ============================================================ */
+.lpac-app .cbi-page-custom-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--lpac-border);
+}
+.lpac-app .cbi-page-custom-actions .cbi-button {
+  margin: 0 !important;
+  flex: 1 1 auto;
+  min-width: 140px;
+}
+
+/* ============================================================
+ * 13. Terminal (system log + AT terminal)
+ * ============================================================ */
+.lpac-app .esim-terminal {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: var(--lpac-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 16px;
+  border-radius: var(--lpac-radius);
+  min-height: 220px;
+  max-height: 500px;
+  overflow-y: auto;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border: 1px solid #1f2937;
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.lpac-app .esim-terminal::-webkit-scrollbar { width: 10px; height: 10px; }
+.lpac-app .esim-terminal::-webkit-scrollbar-track { background: #0d1117; }
+.lpac-app .esim-terminal::-webkit-scrollbar-thumb { background: #30363d; border-radius: 5px; }
+.lpac-app .esim-terminal::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+/* ============================================================
+ * 14. Diagnostics reset cards
+ * ============================================================ */
+.lpac-app .esim-diag-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+.lpac-app .esim-diag-card {
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  background: var(--lpac-bg-card-soft);
+  border: 1px solid var(--lpac-border);
+  border-radius: var(--lpac-radius);
+  transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.lpac-app .esim-diag-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--lpac-border-strong);
+  box-shadow: var(--lpac-shadow-md);
+}
+.lpac-app .esim-diag-card strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--lpac-fg);
+  margin-bottom: 8px;
+}
+.lpac-app .esim-diag-card p {
+  font-size: 13px;
+  color: var(--lpac-fg-soft);
+  line-height: 1.5;
+  margin: 0 0 14px;
+  flex-grow: 1;
+}
+.lpac-app .esim-diag-card .cbi-button {
+  align-self: stretch;
+  margin: 0 !important;
+}
+
+/* AT terminal preset row */
+.lpac-app #at-terminal-section .cbi-button {
+  font-family: var(--lpac-mono);
+  font-size: 12px;
+  padding: 6px 12px;
+  min-height: 36px;
+}
+
+/* ============================================================
+ * 15. Status pills (error / success / info banners inside tabs)
+ * ============================================================ */
+.lpac-app #config-error,
+.lpac-app #profiles-error,
+.lpac-app #notifications-error,
+.lpac-app #esim-info-error,
+.lpac-app #download-error,
+.lpac-app #profile-notifications-error,
+.lpac-app #download-status #download-error {
+  background: var(--lpac-danger-soft) !important;
+  border: 1px solid var(--lpac-danger) !important;
+  color: var(--lpac-danger-text) !important;
+  padding: 12px 16px !important;
+  border-radius: var(--lpac-radius);
+  font-size: 14px;
+}
+
+.lpac-app #config-success,
+.lpac-app #download-success,
+.lpac-app #profile-notifications-success,
+.lpac-app #notifications-success {
+  background: var(--lpac-success-soft) !important;
+  border: 1px solid var(--lpac-success) !important;
+  color: var(--lpac-success-strong) !important;
+  padding: 12px 16px !important;
+  border-radius: var(--lpac-radius);
+  font-size: 14px;
+}
+
+.lpac-app #download-loading {
+  background: var(--lpac-info-soft) !important;
+  border: 1px solid var(--lpac-info) !important;
+  color: var(--lpac-info-text) !important;
+  padding: 14px 16px !important;
+  border-radius: var(--lpac-radius);
+}
+
+.lpac-app #diag-result {
+  border-radius: var(--lpac-radius) !important;
+  padding: 12px 16px !important;
+  font-size: 14px;
+}
+
+/* Loading states */
+.lpac-app #esim-info-loading,
+.lpac-app #profiles-loading,
+.lpac-app #notifications-loading,
+.lpac-app #config-loading {
+  text-align: center;
+  padding: 32px 20px !important;
+  color: var(--lpac-fg-muted);
+  font-size: 14px;
+}
+
+/* QR Preview area */
+.lpac-app #qr-preview {
+  max-width: 100%;
+  border-radius: var(--lpac-radius) !important;
+  border: 1px solid var(--lpac-border-strong) !important;
+  box-shadow: var(--lpac-shadow-sm);
+}
+
+/* ============================================================
+ * 16. Responsive breakpoints — small phones
+ * ============================================================ */
+@media (max-width: 640px) {
+  /* Tabs slightly tighter on phones */
+  .lpac-app .cbi-tabmenu li a {
+    padding: 9px 14px;
+    font-size: 13px;
+  }
+  /* Fieldset breathing room */
+  .lpac-app fieldset.cbi-section {
+    padding: 14px 14px;
+    border-radius: var(--lpac-radius);
+  }
+  /* Stack form rows: label on top, field below */
+  .lpac-app .cbi-value {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    padding: 14px 0;
+  }
+  .lpac-app .cbi-value-title { padding-top: 0; }
+  /* Action bar: full-width buttons */
+  .lpac-app .cbi-page-custom-actions .cbi-button {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+  /* KV grid 1 column */
+  .lpac-app .esim-kv {
+    grid-template-columns: 1fr;
+  }
+  /* Page heading smaller */
+  .lpac-app h2[name="content"] {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+}
+
+/* ============================================================
+ * 17. Compatibility shims for LuCI Material / Bootstrap themes
+ * ============================================================ */
+/* Many LuCI themes wrap content in a colored container.
+ * Cancel decorative borders that conflict with our card design. */
+.lpac-app .cbi-map { background: transparent; box-shadow: none; }
+.lpac-app .cbi-section-node { box-shadow: none; background: transparent; }
+
+/* Prevent Material's compact button reset from killing our buttons */
+.lpac-app input.cbi-button[type="button"] {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* Hide LuCI's old "table-titles" decorative gap (no longer needed) */
+.lpac-app .cbi-section-table-titles { background: transparent; }

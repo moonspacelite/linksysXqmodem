@@ -1,0 +1,31 @@
+#!/bin/sh /etc/rc.common
+
+# 0xygen-Linksys: mount debugfs at boot.
+#
+# luci-app-modemband / modemband.sh probe the connected modem by reading
+# /sys/kernel/debug/usb/devices, which only exists once debugfs is mounted.
+# OpenWrt does not mount debugfs by default. Without it the Fibocom L850-GL
+# (or any other modem) is reported as "No supported modem was found".
+#
+# Mount must happen early in boot, before LuCI / rpcd start serving the
+# modemband page, hence START=09 (slightly before the bulk of services).
+
+START=09
+USE_PROCD=1
+
+DEBUGFS_MOUNTPOINT="/sys/kernel/debug"
+
+start_service() {
+    [ -d "$DEBUGFS_MOUNTPOINT" ] || mkdir -p "$DEBUGFS_MOUNTPOINT"
+    # Already mounted? (mountpoint -q is preferred but may be absent.)
+    if grep -qE "^[^ ]+ ${DEBUGFS_MOUNTPOINT} debugfs " /proc/mounts; then
+        return 0
+    fi
+    mount -t debugfs nodev "$DEBUGFS_MOUNTPOINT" 2>/dev/null || true
+}
+
+stop_service() {
+    # Intentionally a no-op: leaving debugfs mounted is harmless and other
+    # tools (e.g. usbmon) may rely on it.
+    return 0
+}

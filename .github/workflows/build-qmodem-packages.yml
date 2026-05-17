@@ -1,0 +1,240 @@
+name: Build QModem Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: "OpenWrt release version, for example 25.12.4"
+        required: true
+        default: "25.12.4"
+        type: string
+      qmodem_ref:
+        description: "QModem branch, tag, or commit"
+        required: true
+        default: "main"
+        type: string
+      qmodem_ui:
+        description: "QModem LuCI UI variant"
+        required: true
+        default: "modern"
+        type: choice
+        options:
+          - modern
+          - legacy
+      commit_packages:
+        description: "Commit packages into packages/qmodem/<version>/<ui>"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  OPENWRT_TARGET_PATH: ipq40xx/generic
+  OPENWRT_ARCH_LABEL: arm_cortex-a7_neon-vfpv4
+
+jobs:
+  build:
+    name: QModem ${{ inputs.qmodem_ui }} packages for OpenWrt ${{ inputs.openwrt_version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Normalize inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ inputs.openwrt_version }}"
+          version="${version#v}"
+
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){1,2}(-rc[0-9]+)?$ ]]; then
+            echo "::error::openwrt_version must look like 25.12.4, 25.12.0-rc1, or 24.10"
+            exit 1
+          fi
+
+          base_url="https://downloads.openwrt.org/releases/${version}/targets/${OPENWRT_TARGET_PATH}"
+          dir_index="$(curl -fsSL "${base_url}/")"
+          sdk="$(grep -o "openwrt-sdk-${version}-ipq40xx-generic_[^\"]*\\.Linux-x86_64\\.tar\\.zst" <<<"$dir_index" | head -n1 || true)"
+
+          if [[ -z "$sdk" ]]; then
+            echo "::error::SDK for OpenWrt ${version} (${OPENWRT_TARGET_PATH}) was not found"
+            exit 1
+          fi
+
+          qmodem_ref="${{ inputs.qmodem_ref }}"
+          if ! git ls-remote --exit-code https://github.com/FUjr/QModem.git "${qmodem_ref}" >/dev/null; then
+            echo "::error::QModem ref ${qmodem_ref} was not found"
+            exit 1
+          fi
+
+          artifact_name="qmodem-${version}-ea6350v3-${{ inputs.qmodem_ui }}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "base_url=${base_url}" >> "$GITHUB_OUTPUT"
+          echo "sdk_url=${base_url}/${sdk}" >> "$GITHUB_OUTPUT"
+          echo "qmodem_ref=${qmodem_ref}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bison build-essential ca-certificates curl file flex gawk gettext git \
+            libelf-dev libncurses-dev libssl-dev pkgconf python3 python3-pyelftools \
+            rsync unzip wget zlib1g-dev zstd
+
+      - name: Download OpenWrt SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          cd build
+          curl -fL --retry 5 --retry-delay 2 -o sdk.tar.zst "${{ steps.inputs.outputs.sdk_url }}"
+          tar --use-compress-program=unzstd -xf sdk.tar.zst
+          mv openwrt-sdk-* sdk
+
+      - name: Build QModem packages
+        working-directory: build/sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git;%s\n' "${{ steps.inputs.outputs.qmodem_ref }}" >> feeds.conf.default
+          ./scripts/feeds update -a
+
+          shopt -s nullglob
+          for patch in "$GITHUB_WORKSPACE"/patches/qmodem/*.patch; do
+            echo "Applying QModem patch: $(basename "$patch")"
+            git -C feeds/qmodem apply --unidiff-zero --whitespace=fix "$patch"
+          done
+          shopt -u nullglob
+
+          scan_script="feeds/qmodem/application/qmodem/files/usr/share/qmodem/modem_scan.sh"
+          if [[ -f "$scan_script" ]]; then
+            sed -i 's/\*"T99W175"\*/\*"t99w175"\*/g' "$scan_script"
+          fi
+
+          {
+            echo "CONFIG_PACKAGE_qmodem=m"
+            echo "CONFIG_PACKAGE_ubus-at-daemon=m"
+            echo "CONFIG_PACKAGE_tom_modem=m"
+            echo "CONFIG_PACKAGE_sms-tool_q=m"
+            echo "CONFIG_PACKAGE_sms-forwarder=m"
+            echo "CONFIG_PACKAGE_sms-forwarder-next=m"
+            echo "CONFIG_PACKAGE_quectel-CM-5G-M=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-next=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-sms=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-mwan=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-ttlfw4=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_ndisc6=y"
+            echo "CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_generic-qmi-wwan=y"
+            echo "CONFIG_PACKAGE_luci-app-qmodem_USE_TOM_CUSTOMIZED_QUECTEL_CM=y"
+          } >> .config
+
+          if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
+            install_packages=(
+              ubus-at-daemon
+              tom_modem
+              sms-tool_q
+              sms-forwarder-next
+              quectel-CM-5G-M
+              qmodem
+              luci-app-qmodem-next
+            )
+            compile_dirs=(
+              ubus_at_daemon
+              tom_modem
+              sms-tool_q
+              sms_forwarder_next
+              quectel_CM_5G_M
+              qmodem
+              luci-app-qmodem-next
+            )
+          else
+            install_packages=(
+              ubus-at-daemon
+              tom_modem
+              sms-tool_q
+              sms-forwarder
+              quectel-CM-5G-M
+              qmodem
+              luci-app-qmodem
+              luci-app-qmodem-sms
+              luci-app-qmodem-mwan
+              luci-app-qmodem-ttlfw4
+            )
+            compile_dirs=(
+              ubus_at_daemon
+              tom_modem
+              sms-tool_q
+              sms_forwarder
+              quectel_CM_5G_M
+              qmodem
+              luci-app-qmodem
+              luci-app-qmodem-sms
+              luci-app-qmodem-mwan
+              luci-app-qmodem-ttlfw4
+            )
+          fi
+
+          ./scripts/feeds install -f "${install_packages[@]}"
+          make defconfig V=s
+
+          for pkg_dir in "${compile_dirs[@]}"; do
+            echo "Building ${pkg_dir}"
+            make "package/feeds/qmodem/${pkg_dir}/compile" -j"$(nproc)" V=s || make "package/feeds/qmodem/${pkg_dir}/compile" -j1 V=s
+          done
+
+          mkdir -p "$GITHUB_WORKSPACE/dist/qmodem-packages"
+          find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) -path '*/qmodem/*' -print -exec cp -f {} "$GITHUB_WORKSPACE/dist/qmodem-packages/" \;
+          ls -lah "$GITHUB_WORKSPACE/dist/qmodem-packages"
+
+      - name: Write package manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "OpenWrt version: ${{ steps.inputs.outputs.version }}"
+            echo "QModem ref: ${{ steps.inputs.outputs.qmodem_ref }}"
+            echo "QModem UI: ${{ inputs.qmodem_ui }}"
+            echo "Target: Linksys EA6350v3 / ${OPENWRT_TARGET_PATH} / ${OPENWRT_ARCH_LABEL}"
+            echo "Built by: Build QModem Packages workflow"
+          } > dist/qmodem-packages/build-info.txt
+
+      - name: Upload QModem package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.inputs.outputs.artifact_name }}
+          path: dist/qmodem-packages/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit prebuilt QModem packages
+        if: ${{ inputs.commit_packages }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_dir="packages/qmodem/${{ steps.inputs.outputs.version }}/${{ inputs.qmodem_ui }}"
+          rm -rf "$target_dir"
+          mkdir -p "$target_dir"
+          cp -vf dist/qmodem-packages/* "$target_dir/"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$target_dir"
+
+          if git diff --cached --quiet; then
+            echo "No package changes to commit."
+          else
+            git commit -m "Prebuild QModem packages for OpenWrt ${{ steps.inputs.outputs.version }} ${{ inputs.qmodem_ui }}"
+            git push
+          fi

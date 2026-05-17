@@ -1,0 +1,158 @@
+<!-- /usr/lib/lua/luci/view/lpac_esim/config.htm — v3.0.0 -->
+
+<div id="config-loading" style="text-align: center; padding: 20px;">
+    <%:Loading configuration...%>
+</div>
+
+<div id="config-content" style="display: none;">
+    <fieldset class="cbi-section">
+        <legend><%:APDU Backend%></legend>
+        <div class="cbi-section-node">
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Backend Type%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-apdu-backend" class="cbi-input-select" onchange="onBackendChange()" title="APDU transport protocol used to communicate with the eUICC chip via lpac">
+                        <option value="qmi">QMI</option>
+                        <option value="at">AT</option>
+                        <option value="mbim">MBIM</option>
+                    </select>
+                    <div class="cbi-value-description"><%:T99W175 in PID 90d5 uses MBIM. Keep MBIM selected for the default QModem build.%></div>
+                </div>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset class="cbi-section">
+        <legend><%:Device Settings%></legend>
+        <div class="cbi-section-node">
+            <div class="cbi-value" id="cfg-qmi-device-row">
+                <label class="cbi-value-title"><%:QMI Device%></label>
+                <div class="cbi-value-field">
+                    <input type="text" id="cfg-qmi-device" class="cbi-input-text" placeholder="/dev/cdc-wdm0" title="QMI control device path. Usually /dev/cdc-wdm0. Check: ls /dev/cdc-wdm*" />
+                    <div class="cbi-value-description"><%:QMI control channel. Typically /dev/cdc-wdm0.%></div>
+                </div>
+            </div>
+            <div class="cbi-value" id="cfg-at-device-row">
+                <label class="cbi-value-title"><%:AT Device%></label>
+                <div class="cbi-value-field">
+                    <input type="text" id="cfg-at-device" class="cbi-input-text" placeholder="/dev/ttyUSB2" title="Serial AT port for modem commands: reboot (AT+CFUN), slot switch (AT^SWITCH_SLOT), AT terminal. T99W175 normally uses /dev/ttyUSB2." />
+                    <div class="cbi-value-description"><%:Serial AT port. T99W175 normally answers AT commands on /dev/ttyUSB2.%></div>
+                </div>
+            </div>
+            <div class="cbi-value" id="cfg-sim-slot-row">
+                <label class="cbi-value-title"><%:SIM Slot%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-sim-slot" class="cbi-input-select" title="Physical SIM slot. Controls which UIM slot the modem uses. Changed via AT^SWITCH_SLOT.">
+                        <option value="0">Slot 0 (physical SIM)</option>
+                        <option value="1">Slot 1 (internal eSIM / eUICC)</option>
+                    </select>
+                    <div class="cbi-value-description"><%:T99W175 reports AT^SWITCH_SLOT? as 0 for physical SIM and 1 for the internal eSIM slot.%></div>
+                </div>
+            </div>
+            <div class="cbi-value" id="cfg-mbim-device-row" style="display: none;">
+                <label class="cbi-value-title"><%:MBIM Device%></label>
+                <div class="cbi-value-field">
+                    <input type="text" id="cfg-mbim-device" class="cbi-input-text" placeholder="/dev/cdc-wdm0" title="MBIM control device. Same physical device as QMI but accessed via MBIM protocol." />
+                    <div class="cbi-value-description"><%:MBIM control channel. Usually /dev/cdc-wdm0.%></div>
+                </div>
+            </div>
+            <div class="cbi-value" id="cfg-mbim-proxy-row" style="display: none;">
+                <label class="cbi-value-title"><%:MBIM Proxy%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-mbim-proxy" class="cbi-input-select" title="Enable mbim-proxy for shared access to MBIM port. Required when ModemManager is active.">
+                        <option value="0"><%:Disabled%></option>
+                        <option value="1"><%:Enabled%></option>
+                    </select>
+                    <div class="cbi-value-description"><%:Required when ModemManager is running. Prevents MBIM port conflicts (recommended: Enabled).%></div>
+                </div>
+            </div>
+            <div class="cbi-value" id="cfg-mbim-skip-slot-row" style="display: none;">
+                <label class="cbi-value-title"><%:Skip Slot Mapping%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-mbim-skip-slot" class="cbi-input-select" title="Skip MBIM Device Slot Mapping on init. Required for Fibocom L850GL and similar modems that reject slot mapping with OperationNotAllowed.">
+                        <option value="0"><%:Disabled%></option>
+                        <option value="1"><%:Enabled%></option>
+                    </select>
+                    <div class="cbi-value-description"><%:Enable for L850GL. Skips MBIM slot mapping that causes OperationNotAllowed error.%></div>
+                </div>
+            </div>
+            <div class="cbi-value" id="cfg-custom-isd-r-aid-row">
+                <label class="cbi-value-title"><%:Custom ISD-R AID%></label>
+                <div class="cbi-value-field">
+                    <input type="text" id="cfg-custom-isd-r-aid" class="cbi-input-text" placeholder="" title="Custom ISD-R AID for eUICC access. Leave empty to use lpac default. L850GL needs: A0000005591010FFFFFFFF8900000100" />
+                    <div class="cbi-value-description"><%:Leave empty for default. L850GL requires: A0000005591010FFFFFFFF8900000100%></div>
+                </div>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset class="cbi-section">
+        <legend><%:Network & Modem%></legend>
+        <div class="cbi-section-node">
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Modem Interface%></label>
+                <div class="cbi-value-field">
+                    <input type="text" id="cfg-modem-iface" class="cbi-input-text" placeholder="modem" title="Network interface name used by the modem (for ifdown/ifup during profile switch)" />
+                    <div class="cbi-value-description"><%:Network interface name (netifd) for the modem connection. In this QModem build the T99W175 interface is normally 1_1.%></div>
+                </div>
+            </div>
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Reboot Method%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-reboot-method" class="cbi-input-select" title="How the modem reboots after profile switch. Auto tries QMI DMS, then AT+CFUN, then USB sysfs reset.">
+                        <option value="script"><%:Auto (script cascade: QMI → AT → USB)%></option>
+                    </select>
+                    <div class="cbi-value-description"><%:Automatic 3-level reboot cascade. Tries active protocol first, then falls back.%></div>
+                </div>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset class="cbi-section">
+        <legend><%:Debug%></legend>
+        <div class="cbi-section-node">
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:APDU Debug%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-apdu-debug" class="cbi-input-select" title="Log raw APDU commands between lpac and eUICC chip. Verbose output in syslog.">
+                        <option value="0"><%:Disabled%></option>
+                        <option value="1"><%:Enabled%></option>
+                    </select>
+                </div>
+            </div>
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:HTTP Debug%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-http-debug" class="cbi-input-select" title="Log HTTP requests to SM-DP+ servers during profile download. Shows TLS and RSP protocol details.">
+                        <option value="0"><%:Disabled%></option>
+                        <option value="1"><%:Enabled%></option>
+                    </select>
+                </div>
+            </div>
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:AT Debug%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-at-debug" class="cbi-input-select" title="Log AT command exchange with modem serial port. Useful for debugging reboot and slot switch.">
+                        <option value="0"><%:Disabled%></option>
+                        <option value="1"><%:Enabled%></option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </fieldset>
+
+    <div class="cbi-page-custom-actions">
+        <input type="button" class="cbi-button cbi-button-apply" value="<%:Save & Apply%>" onclick="saveConfig()" title="Save settings to UCI and apply immediately" />
+        <input type="button" class="cbi-button cbi-button-reset" value="<%:Reset%>" onclick="loadConfig()" title="Reload from UCI, discard unsaved changes" />
+    </div>
+</div>
+
+<div id="config-error" style="display: none; color: red; padding: 10px;">
+    <strong><%:Error%>:</strong> <span id="config-error-message"></span>
+</div>
+
+<div id="config-success" style="display: none; color: green; padding: 10px;">
+    <strong><%:Success%>:</strong> <span id="config-success-message"></span>
+</div>
+
+<script type="text/javascript" src="<%=resource%>/lpac-esim/js/lpac-esim-config.js?v=3.0.1"></script>

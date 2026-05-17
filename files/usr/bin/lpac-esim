@@ -1,0 +1,1643 @@
+#!/bin/sh
+# lpac-esim — eSIM profile management for OpenWrt
+# BusyBox ash / POSIX shell
+# Version: 3.0.1
+# License: GPL-2.0
+#
+# Changelog:
+#   3.0.0 - Safe profile switch (ifdown/disconnect MM/enable/wait/ifup),
+#           separate disable API, AT Terminal multi-fallback
+#           (atinout/sms_tool/microcom/socat/raw serial),
+#           modem_iface config, version consistency fix
+#   2.8.0 - ANSI strip in mm_field, jq -nc compact output, async fork detach,
+#           diagnostic APIs (syslog, soft-reset, usb-reset, uicc-reset),
+#           MBIM full support (build_lpac_env, reboot cascade, autodetect),
+#           download/delete/nickname/notif-process APIs, sq() shellquote helper,
+#           async_finish() with RESULT_FILE for real success/error reporting
+#   2.6.0 - Initial --api mode with JSON output for LuCI WebUI integration
+
+###############################################################################
+# Global defaults
+###############################################################################
+
+APP_NAME="lpac-esim"
+APP_VER="3.0.1"
+
+NO_COLOR="${NO_COLOR:-0}"
+QUIET=0
+VERBOSE=0
+DEBUG=0
+FAST_CLEAN=0
+NO_MM=0
+
+BACKEND="qmi"
+HTTP_BACKEND="curl"
+QMI_DEVICE=""
+QMI_SLOT="1"
+AT_DEVICE=""
+MBIM_DEVICE=""
+MBIM_PROXY="0"
+MBIM_SKIP_SLOT_MAPPING="0"
+CUSTOM_ISD_R_AID=""
+MODEM_IFACE="modem"
+
+# Download parameters (set via CLI flags)
+DL_LPA=""
+DL_SMDP=""
+DL_MATCHID=""
+DL_CONFIRM=""
+DL_NICKNAME=""
+
+LPAC_BIN=""
+QMICLI_BIN=""
+MBIMCLI_BIN=""
+MMCLI_BIN=""
+JQ_BIN=""
+TIMEOUT_BIN=""
+
+TMP_DIR="/tmp/${APP_NAME}"
+LOG_FILE="${TMP_DIR}/run.log"
+LOCK_FILE="${TMP_DIR}/lpac.lock"
+RESULT_FILE="${TMP_DIR}/last_result.json"
+SELECTED_TARGET=""
+
+# API mode: set to 1 via --api flag.
+# Suppresses all human-readable output; all results go to stdout as JSON.
+API_MODE=0
+
+# Non-interactive mode: skips confirmation prompts and live monitor.
+# Set automatically when API_MODE=1, or via --non-interactive flag.
+NONINTERACTIVE=0
+
+###############################################################################
+# Colors / Logging / Syslog
+###############################################################################
+
+init_colors() {
+    if [ "$NO_COLOR" = "1" ] || [ ! -t 1 ]; then return; fi
+    C_RST="$(printf '\033[0m')"
+    C_OK="$(printf '\033[32m')"
+    C_WARN="$(printf '\033[33m')"
+    C_ERR="$(printf '\033[31m')"
+    C_INFO="$(printf '\033[36m')"
+    C_DIM="$(printf '\033[2m')"
+}
+
+say() { [ "$QUIET" = "1" ] && return 0; printf '%s\n' "$*"; }
+syslog_msg() { check_cmd logger >/dev/null 2>&1 && logger -t "lpac-esim" "$1"; }
+log_line() { mkdir -p "$TMP_DIR" >/dev/null 2>&1; printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"; }
+log_verbose() { log_line "[VERBOSE] $*"; [ "$VERBOSE" = "1" ] && say "${C_DIM}[VERBOSE] $*${C_RST}"; }
+
+ok()   { say "${C_OK}[ OK ]${C_RST} $*"; log_line "[ OK ] $*"; }
+warn() { say "${C_WARN}[WARN]${C_RST} $*"; log_line "[WARN] $*"; }
+fail() { say "${C_ERR}[FAIL]${C_RST} $*"; log_line "[FAIL] $*"; syslog_msg "ERROR: $*"; }
+info() { say "${C_INFO}[INFO]${C_RST} $*"; log_line "[INFO] $*"; }
+step() { say "${C_DIM}[....]${C_RST} $*"; log_line "[....] $*"; }
+
+talk() { printf '\n'; say "${C_INFO}[ * ]${C_RST} $*"; log_line "[TALK] $*"; sleep 1; }
+die() { fail "$*"; exit 1; }
+hr() { say "----------------------------------------------------------------"; }
+title() { hr; say "  $APP_NAME v$APP_VER"; hr; }
+
+###############################################################################
+# Custom POSIX Timeout wrapper
+###############################################################################
+
+run_with_timeout() {
+    t_sec=$1; shift
+    if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$t_sec" "$@"; return $?; fi
+    ( "$@" ) >/dev/null 2>&1 &
+    pid=$!; count=0
+    while [ "$count" -lt "$t_sec" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then wait "$pid" 2>/dev/null; return $?; fi
+        sleep 1; count=$((count + 1))
+    done
+    kill -9 "$pid" 2>/dev/null; killall -9 lpac 2>/dev/null; wait "$pid" 2>/dev/null
+    return 124
+}
+
+###############################################################################
+# CLI Arguments
+###############################################################################
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --device)         shift; QMI_DEVICE="$1" ;;
+            --slot)           shift; QMI_SLOT="$1" ;;
+            --backend)        shift; BACKEND="$1" ;;
+            --at-device)      shift; AT_DEVICE="$1" ;;
+            --mbim-device)    shift; MBIM_DEVICE="$1" ;;
+            --mbim-proxy)     MBIM_PROXY="1" ;;
+            --mbim-skip-slot) MBIM_SKIP_SLOT_MAPPING="1" ;;
+            --custom-isd-r-aid) shift; CUSTOM_ISD_R_AID="$1" ;;
+            --modem-iface)    shift; MODEM_IFACE="$1" ;;
+            --lpa)            shift; DL_LPA="$1" ;;
+            --smdp)           shift; DL_SMDP="$1" ;;
+            --matching-id)    shift; DL_MATCHID="$1" ;;
+            --confirmation)   shift; DL_CONFIRM="$1" ;;
+            --nickname)       shift; DL_NICKNAME="$1" ;;
+            --verbose)        VERBOSE=1 ;;
+            --no-color)       NO_COLOR=1 ;;
+            --api)            API_MODE=1; NONINTERACTIVE=1; QUIET=1; NO_COLOR=1 ;;
+            --non-interactive) NONINTERACTIVE=1 ;;
+            doctor|status|chip|profiles|notif-clear|notif-list|notif-process|modem-status|select-devices|reboot-modem|lock-status|soft-reset|usb-reset|uicc-reset|runlog|version)
+                              COMMAND="$1" ;;
+            enable|disable|switch)
+                              COMMAND="$1"; shift; COMMAND_ARG="$1" ;;
+            delete|nickname|at-cmd|syslog)
+                              COMMAND="$1"; shift; COMMAND_ARG="$1" ;;
+            download)
+                              COMMAND="$1" ;;
+            *) die "unknown argument: $1" ;;
+        esac
+        shift
+    done
+}
+
+###############################################################################
+# Checks & Discoveries
+###############################################################################
+
+check_cmd() { command -v "$1" 2>/dev/null; }
+
+load_uci_config() {
+    command -v uci >/dev/null 2>&1 || return 0
+    _v="$(uci -q get lpac-esim.main.apdu_backend 2>/dev/null)"; [ -n "$_v" ] && BACKEND="$_v"
+    _v="$(uci -q get lpac-esim.main.qmi_device 2>/dev/null)"; [ -n "$_v" ] && QMI_DEVICE="$_v"
+    _v="$(uci -q get lpac-esim.main.qmi_sim_slot 2>/dev/null)"; [ -n "$_v" ] && QMI_SLOT="$_v"
+    _v="$(uci -q get lpac-esim.main.at_device 2>/dev/null)"; [ -n "$_v" ] && AT_DEVICE="$_v"
+    _v="$(uci -q get lpac-esim.main.mbim_device 2>/dev/null)"; [ -n "$_v" ] && MBIM_DEVICE="$_v"
+    _v="$(uci -q get lpac-esim.main.mbim_proxy 2>/dev/null)"; [ "$_v" = "1" ] && MBIM_PROXY="1"
+    _v="$(uci -q get lpac-esim.main.mbim_skip_slot_mapping 2>/dev/null)"; [ "$_v" = "1" ] && MBIM_SKIP_SLOT_MAPPING="1"
+    _v="$(uci -q get lpac-esim.main.custom_isd_r_aid 2>/dev/null)"; [ -n "$_v" ] && CUSTOM_ISD_R_AID="$_v"
+    _v="$(uci -q get lpac-esim.main.modem_iface 2>/dev/null)"; [ -n "$_v" ] && MODEM_IFACE="$_v"
+}
+
+# Silent runtime init — sets tool paths only, no logging output.
+# Called on EVERY API request to ensure JQ_BIN etc are always set.
+init_tools_runtime() {
+    LPAC_BIN="$(check_cmd lpac)"
+    JQ_BIN="$(check_cmd jq)"
+    QMICLI_BIN="$(check_cmd qmicli)"
+    MBIMCLI_BIN="$(check_cmd mbimcli)"
+    MMCLI_BIN="$(check_cmd mmcli)"
+    TIMEOUT_BIN="$(check_cmd timeout)"
+}
+
+check_required_tools() {
+    step "Checking required tools..."
+    LPAC_BIN="$(check_cmd lpac)"; [ -n "$LPAC_BIN" ] && ok "lpac found: $LPAC_BIN" || die "lpac not found in PATH"
+    JQ_BIN="$(check_cmd jq)";       [ -n "$JQ_BIN" ]      && ok "jq found: $JQ_BIN"       || die "jq not found in PATH"
+    QMICLI_BIN="$(check_cmd qmicli)"; [ -n "$QMICLI_BIN" ] && ok "qmicli found: $QMICLI_BIN" || warn "qmicli not found"
+    MBIMCLI_BIN="$(check_cmd mbimcli)"; [ -n "$MBIMCLI_BIN" ] && ok "mbimcli found: $MBIMCLI_BIN" || warn "mbimcli not found"
+    MMCLI_BIN="$(check_cmd mmcli)"; [ -n "$MMCLI_BIN" ]   && ok "mmcli found: $MMCLI_BIN" || warn "mmcli not found"
+    TIMEOUT_BIN="$(check_cmd timeout)"; [ -n "$TIMEOUT_BIN" ] || log_verbose "Native timeout not found, using shell wrapper."
+}
+
+check_lpac_version() {
+    step "Checking lpac version..."
+    v_raw="$($LPAC_BIN version 2>/dev/null)"
+    v_str="$(echo "$v_raw" | "$JQ_BIN" -r '.payload.data // empty' 2>/dev/null)"
+    if [ "$v_str" = "v0.0.0-unknown" ]; then ok "Custom monolithic lpac build detected"
+    elif echo "$v_str" | grep -q '2\.3'; then ok "lpac version 2.3.x detected: $v_str"
+    else warn "lpac version is '${v_str:-unknown}'. Expected 2.3.x."; fi
+}
+
+select_qmi_device() {
+    idx=1; tmp="${TMP_DIR}/qmi.list"; : > "$tmp"
+    for d in /dev/cdc-wdm*; do [ -e "$d" ] && echo "$d" >> "$tmp"; done
+    [ ! -s "$tmp" ] && die "No /dev/cdc-wdm* devices found"
+    hr; info "Available QMI CDC devices:"
+    while IFS= read -r dev; do printf '  %s) %s\n' "$idx" "$dev"; idx=$((idx + 1)); done < "$tmp"
+    printf 'Select QMI device number [1]: '; read ans; [ -z "$ans" ] && ans="1"
+    sel="$(sed -n "${ans}p" "$tmp")"; [ -z "$sel" ] && die "Invalid QMI selection"
+    QMI_DEVICE="$sel"; ok "Selected QMI: $QMI_DEVICE"
+}
+
+select_at_port() {
+    idx=1; tmp="${TMP_DIR}/at.list"; : > "$tmp"
+    for d in /dev/ttyUSB* /dev/ttyACM*; do [ -e "$d" ] && echo "$d" >> "$tmp"; done
+    hr
+    if [ ! -s "$tmp" ]; then warn "No /dev/ttyUSB* or /dev/ttyACM* ports found."; AT_DEVICE=""; return 0; fi
+    info "Available AT TTY ports:"
+    while IFS= read -r dev; do printf '  %s) %s\n' "$idx" "$dev"; idx=$((idx + 1)); done < "$tmp"
+    printf '  0) Skip / None\n'
+    printf 'Select AT fallback port number [1]: '; read ans; [ -z "$ans" ] && ans="1"
+    if [ "$ans" = "0" ]; then AT_DEVICE=""; warn "No AT port selected."
+    else sel="$(sed -n "${ans}p" "$tmp")"; if [ -n "$sel" ]; then AT_DEVICE="$sel"; ok "Selected AT: $AT_DEVICE"; else warn "Invalid AT selection."; AT_DEVICE=""; fi; fi
+}
+
+# In API/non-interactive mode: auto-detect devices without prompts.
+autodetect_devices() {
+    if [ "$BACKEND" = "mbim" ]; then
+        # MBIM mode: auto-detect MBIM device
+        if [ -z "$MBIM_DEVICE" ]; then
+            for d in /dev/cdc-wdm*; do
+                if [ -e "$d" ]; then MBIM_DEVICE="$d"; log_verbose "Auto-detected MBIM: $MBIM_DEVICE"; break; fi
+            done
+            [ -z "$MBIM_DEVICE" ] && log_verbose "No MBIM device auto-detected, using default /dev/cdc-wdm0" && MBIM_DEVICE="/dev/cdc-wdm0"
+        fi
+        # Also detect QMI device for fallback reboot (QMI DMS reset works even with MBIM data)
+        if [ -z "$QMI_DEVICE" ]; then
+            for d in /dev/cdc-wdm*; do
+                if [ -e "$d" ]; then QMI_DEVICE="$d"; break; fi
+            done
+        fi
+    else
+        # QMI/AT mode
+        if [ -z "$QMI_DEVICE" ]; then
+            for d in /dev/cdc-wdm*; do
+                if [ -e "$d" ]; then QMI_DEVICE="$d"; log_verbose "Auto-detected QMI: $QMI_DEVICE"; break; fi
+            done
+            [ -z "$QMI_DEVICE" ] && log_verbose "No QMI device auto-detected, using default /dev/cdc-wdm0" && QMI_DEVICE="/dev/cdc-wdm0"
+        fi
+    fi
+    if [ -z "$AT_DEVICE" ]; then
+        for d in /dev/ttyACM0 /dev/ttyACM2 /dev/ttyACM* /dev/ttyUSB*; do
+            if [ -e "$d" ]; then AT_DEVICE="$d"; log_verbose "Auto-detected AT: $AT_DEVICE"; break; fi
+        done
+    fi
+}
+
+###############################################################################
+# lpac Environment & Execution
+###############################################################################
+
+build_lpac_env() {
+    if [ "$BACKEND" = "qmi" ]; then
+        printf 'LPAC_APDU=qmi LPAC_HTTP=%s LPAC_APDU_QMI_DEVICE=%s LPAC_APDU_QMI_UIM_SLOT=%s' \
+            "$HTTP_BACKEND" "$QMI_DEVICE" "$QMI_SLOT"
+    elif [ "$BACKEND" = "mbim" ]; then
+        printf 'LPAC_APDU=mbim LPAC_HTTP=%s LPAC_APDU_MBIM_DEVICE=%s' \
+            "$HTTP_BACKEND" "$MBIM_DEVICE"
+        [ "$MBIM_PROXY" = "1" ] && printf ' LPAC_APDU_MBIM_USE_PROXY=1'
+        [ "$MBIM_SKIP_SLOT_MAPPING" = "1" ] && printf ' LPAC_APDU_MBIM_SKIP_SLOT_MAPPING=1'
+    else
+        printf 'LPAC_APDU=at LPAC_HTTP=%s LPAC_APDU_AT_DEVICE=%s' "$HTTP_BACKEND" "$AT_DEVICE"
+    fi
+    [ -n "$CUSTOM_ISD_R_AID" ] && printf ' LPAC_CUSTOM_ISD_R_AID=%s' "$CUSTOM_ISD_R_AID"
+}
+
+run_lpac_json_to_file() {
+    action="$1"; out="$2"; t_sec="${3:-15}"
+    envs="$(build_lpac_env)"; cmd="$envs $LPAC_BIN $action"
+    log_verbose "Executing (Timeout ${t_sec}s): $cmd"
+    if run_with_timeout "$t_sec" sh -c "$cmd > \"$out\" 2>>\"$LOG_FILE\""; then return 0
+    else
+        ret=$?
+        if [ "$ret" = "124" ]; then
+            syslog_msg "TIMEOUT: lpac $action timed out after ${t_sec}s"
+            warn "Command TIMED OUT after ${t_sec}s! Modem might be locked."
+        else
+            syslog_msg "FAIL: lpac $action exited with code $ret"
+            log_verbose "Command failed with code $ret"
+        fi
+        return $ret
+    fi
+}
+
+###############################################################################
+# JSON & Profile Parsers
+###############################################################################
+
+json_last_line() { sed '/^[[:space:]]*$/d' "$1" | tail -n 1; }
+json_code()      { json_last_line "$1" | "$JQ_BIN" -r '.payload.code // empty' 2>/dev/null; }
+json_message()   { json_last_line "$1" | "$JQ_BIN" -r '.payload.message // empty' 2>/dev/null; }
+json_data_len()  { json_last_line "$1" | "$JQ_BIN" -r 'if (.payload.data | type) == "array" then (.payload.data | length) else 0 end' 2>/dev/null; }
+
+get_chip_info_json()  { out="${TMP_DIR}/chip.json";     run_lpac_json_to_file "chip info"      "$out" || return 1; printf '%s\n' "$out"; }
+get_profiles_json()   { out="${TMP_DIR}/profiles.json"; run_lpac_json_to_file "profile list"   "$out" || return 1; printf '%s\n' "$out"; }
+mask_iccid() {
+    v="$1"; len="$(printf '%s' "$v" | wc -c | awk '{print $1}')"
+    if [ "$len" -le 8 ]; then printf '%s' "$v"; return 0; fi
+    tail4="$(printf '%s' "$v" | sed 's/.*\(....\)$/\1/')"; printf '...%s' "$tail4"
+}
+
+profile_resolve_record() {
+    file="$1"; selector="$2"; count="$(json_data_len "$file")"; [ -z "$selector" ] && return 1
+    echo "$selector" | grep -q '^[0-9][0-9]*$'
+    if [ $? -eq 0 ]; then
+        row="$selector"; idx=$((row - 1))
+        if [ "$row" -ge 1 ] && [ "$row" -le "$count" ]; then
+            json_last_line "$file" | "$JQ_BIN" -r --argjson i "$idx" \
+                '.payload.data[$i] | [($i+1|tostring), .iccid, .isdpAid, .profileState, (.profileNickname // "-"), (.serviceProviderName // "-")] | join("|")' 2>/dev/null
+            return 0
+        fi
+    fi
+    selector_lc="$(printf '%s' "$selector" | tr 'A-Z' 'a-z')"
+    rec="$(json_last_line "$file" | "$JQ_BIN" -r --arg v "$selector" \
+        '.payload.data | to_entries[] | select(.value.iccid == $v) | [(.key+1|tostring), .value.iccid, .value.isdpAid, .value.profileState, (.value.profileNickname // "-"), (.value.serviceProviderName // "-")] | join("|")' 2>/dev/null | head -n 1)"
+    if [ -n "$rec" ]; then printf '%s\n' "$rec"; return 0; fi
+    rec="$(json_last_line "$file" | "$JQ_BIN" -r --arg v "$selector_lc" \
+        '.payload.data | to_entries[] | select((.value.isdpAid | ascii_downcase) == $v) | [(.key+1|tostring), .value.iccid, .value.isdpAid, .value.profileState, (.value.profileNickname // "-"), (.value.serviceProviderName // "-")] | join("|")' 2>/dev/null | head -n 1)"
+    [ -n "$rec" ] && printf '%s\n' "$rec"
+}
+
+profile_get_active_record() {
+    json_last_line "$1" | "$JQ_BIN" -r \
+        '.payload.data | to_entries[] | select(.value.profileState == "enabled") | [(.key+1|tostring), .value.iccid, .value.isdpAid, .value.profileState, (.value.profileNickname // "-"), (.value.serviceProviderName // "-")] | join("|")' \
+        2>/dev/null | head -n 1
+}
+
+profile_state_by_ref() {
+    st="$(json_last_line "$1" | "$JQ_BIN" -r --arg ic "$2" \
+        '.payload.data[] | select(.iccid == $ic) | .profileState' 2>/dev/null | head -n 1)"
+    if [ -n "$st" ]; then printf '%s\n' "$st"; return 0; fi
+    aid_lc="$(printf '%s' "$3" | tr 'A-Z' 'a-z')"
+    st="$(json_last_line "$1" | "$JQ_BIN" -r --arg aid "$aid_lc" \
+        '.payload.data[] | select((.isdpAid | ascii_downcase) == $aid) | .profileState' 2>/dev/null | head -n 1)"
+    [ -n "$st" ] && printf '%s\n' "$st"
+}
+
+###############################################################################
+# Print Formatting (interactive only)
+###############################################################################
+
+print_chip_summary() {
+    file="$1"; code="$(json_code "$file")"
+    [ "$code" = "0" ] || { fail "chip info failed"; return 1; }
+    hr; info "eUICC Chip Information"
+    eid="$(json_last_line "$file" | "$JQ_BIN" -r '.payload.data.eidValue // "-"' 2>/dev/null)"
+    profv="$(json_last_line "$file" | "$JQ_BIN" -r '.payload.data.EUICCInfo2.profileVersion // "-"' 2>/dev/null)"
+    printf '  EID            : %s\n' "$eid"; printf '  Profile ver    : %s\n' "$profv"
+    syslog_msg "eUICC Chip Info | EID: $eid | FW: $profv"
+}
+
+print_profiles_table() {
+    file="$1"; code="$(json_code "$file")"
+    [ "$code" = "0" ] || { fail "Profile list failed."; return 1; }
+    count="$(json_data_len "$file")"; info "Profiles found on card: $count"; hr
+    printf '%-4s %-22s %-10s %-10s %-16s\n' "ID" "Nickname" "State" "ICCID" "Provider"; hr
+    i=0; while [ "$i" -lt "$count" ]; do
+        idx=$((i + 1))
+        nick="$(json_last_line "$file" | "$JQ_BIN" -r ".payload.data[$i].profileNickname // \"-\"" 2>/dev/null)"
+        state="$(json_last_line "$file" | "$JQ_BIN" -r ".payload.data[$i].profileState // \"-\"" 2>/dev/null)"
+        iccid="$(json_last_line "$file" | "$JQ_BIN" -r ".payload.data[$i].iccid // \"-\"" 2>/dev/null)"
+        prov="$(json_last_line "$file" | "$JQ_BIN" -r ".payload.data[$i].serviceProviderName // \"-\"" 2>/dev/null)"
+        short_iccid="$(mask_iccid "$iccid")"
+        if [ "$state" = "enabled" ]; then
+            printf '%b%-4s %-22s %-10s %-10s %-16s%b\n' "$C_OK" "$idx" "$nick" "$state" "$short_iccid" "$prov" "$C_RST"
+        else
+            printf '%-4s %-22s %-10s %-10s %-16s\n' "$idx" "$nick" "$state" "$short_iccid" "$prov"
+        fi
+        i=$((i + 1))
+    done; hr
+    active="$(profile_get_active_record "$file")"
+    if [ -n "$active" ]; then
+        old_IFS="$IFS"; IFS='|'; set -- $active; IFS="$old_IFS"
+        ok "Active profile: [$1] $5 (ICCID: $2)"
+        syslog_msg "Active Profile Checked | $5 (ICCID: $2)"
+    else
+        warn "No active profile detected!"
+        syslog_msg "Active Profile Checked | None detected"
+    fi
+}
+
+###############################################################################
+# ModemManager status & Monitor
+###############################################################################
+
+detect_modem_index() {
+    [ -n "$MMCLI_BIN" ] || return 1
+    "$MMCLI_BIN" -L 2>/dev/null | sed -n 's|.*/Modem/\([0-9][0-9]*\).*|\1|p' | tail -n 1
+}
+
+mm_field() {
+  file="$1"; key="$2"
+  val="$(sed -n "s/.*$key:[[:space:]]*//p" "$file" | head -n 1)"
+  printf '%s' "$val" | sed "$(printf 's/\033\[[0-9;]*m//g')"
+}
+
+print_modem_status() {
+    [ -n "$MMCLI_BIN" ] || { warn "mmcli not available"; return 1; }
+    idx="$(detect_modem_index)"; [ -n "$idx" ] || { warn "No modem detected via mmcli -L"; return 1; }
+    out="${TMP_DIR}/mmcli-modem-${idx}.txt"
+    "$MMCLI_BIN" -m "$idx" > "$out" 2>/dev/null || { fail "Failed to read modem details"; return 1; }
+    hr; info "ModemManager Status (Internal ID: $idx)"
+    m_op="$(mm_field "$out" "operator name")"
+    m_st="$(mm_field "$out" "state")"
+    m_sig="$(mm_field "$out" "signal quality")"
+    m_tech="$(mm_field "$out" "access tech")"
+    printf '  Model          : %s\n' "$(mm_field "$out" "model")"
+    printf '  State          : %s\n' "$m_st"
+    printf '  Operator       : %s\n' "$m_op"
+    printf '  Access tech    : %s\n' "$m_tech"
+    printf '  Signal quality : %s\n' "$m_sig"
+    syslog_msg "Modem Report | Operator: ${m_op:-None} | State: ${m_st:-Unknown} | Signal: ${m_sig:-Unknown}"
+}
+
+monitor_modem_status() {
+    while :; do
+        print_modem_status
+        hr
+        printf "  [r] Refresh Status | [a] Auto-Refresh (5s) | [0] Return to Menu | [q] Exit to Shell\n"
+        printf "Select: "
+        read ans
+        case "$ans" in
+            r|R|"") continue ;;
+            a|A)
+                say "Auto-refreshing every 5 seconds. Press Ctrl+C to abort."
+                while :; do
+                    clear 2>/dev/null || echo -e "\033c"
+                    title
+                    print_modem_status
+                    sleep 5
+                done
+                ;;
+            0|b|B) return 0 ;;
+            q|Q|exit|quit) exit 0 ;;
+            *) continue ;;
+        esac
+    done
+}
+
+###############################################################################
+# Core Logic & Resets
+###############################################################################
+
+disconnect_modemmanager() {
+    [ -n "$MMCLI_BIN" ] || return 0
+    "$MMCLI_BIN" -L 2>/dev/null | sed -n 's|.*/Modem/\([0-9][0-9]*\).*|\1|p' | while read -r modem_id; do
+        [ -n "$modem_id" ] || continue
+        "$MMCLI_BIN" -m "$modem_id" --simple-disconnect >/dev/null 2>&1 || true
+    done
+}
+
+notif_clear_queue() {
+    talk "Clearing pending notifications from local eUICC queue (Offline)..."
+    out="${TMP_DIR}/notif-remove-all.json"; run_lpac_json_to_file "notification remove -a" "$out" 20
+    if [ "$(json_code "$out")" = "0" ]; then
+        ok "All pending notifications were deleted."
+    else
+        warn "Failed to clear notifications (queue might be empty)."
+    fi
+}
+
+try_profile_action_variants() {
+    action="$1"; desired="$2"; iccid="$3"; aid="$4"; tmp_out="${TMP_DIR}/profile-action.json"
+    for ent in "$iccid|" "$aid|"; do
+        target="${ent%%|*}"; [ -n "$target" ] || continue
+        step "Attempting: profile $action $target"
+        run_lpac_json_to_file "profile $action $target" "$tmp_out" 20
+        if [ "$(json_code "$tmp_out")" = "0" ]; then ok "Operation successful via $target."; return 0; fi
+        pf="$(get_profiles_json)" || true
+        if [ -n "$pf" ]; then
+            st="$(profile_state_by_ref "$pf" "$iccid" "$aid")"
+            if [ "$st" = "$desired" ]; then ok "State reached '$desired' despite lpac error."; return 0; fi
+        fi
+        warn "Attempt failed, retrying alternative method..."
+    done
+    return 1
+}
+
+usb_nuclear_reset() {
+    qmi_base="${QMI_DEVICE##*/}"
+    sys_path="/sys/class/usbmisc/$qmi_base/device/.."
+    real_path="$(readlink -f "$sys_path" 2>/dev/null)"
+    [ -z "$real_path" ] && real_path="$sys_path"
+    if [ -e "$real_path/authorized" ]; then
+        syslog_msg "Executing Nuclear USB Reset via sysfs on $real_path..."
+        step "Executing USB Sysfs Reset (Drop & Re-enumerate)..."
+        echo 0 > "$real_path/authorized"
+        sleep 3
+        echo 1 > "$real_path/authorized"
+        return 0
+    fi
+    return 1
+}
+
+reboot_modem_hard() {
+    talk "Applying changes via HARD REBOOT of the modem hardware..."
+    syslog_msg "Modem HARD REBOOT sequence initiated (backend: $BACKEND)."
+
+    local reboot_ok=0
+    local wait_device="$QMI_DEVICE"
+
+    if [ "$BACKEND" = "mbim" ]; then
+        # MBIM reboot: try mbimcli first
+        wait_device="$MBIM_DEVICE"
+        if [ -n "$MBIMCLI_BIN" ] && [ -e "$MBIM_DEVICE" ]; then
+            step "Executing MBIM UICC Reset..."
+            if "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=off >/dev/null 2>&1; then
+                sleep 2
+                "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=on >/dev/null 2>&1
+                ok "MBIM radio reset sent."
+                reboot_ok=1
+            else
+                warn "MBIM reset failed."
+            fi
+        fi
+        # MBIM fallback: try QMI DMS reset if qmicli available (works on many modems even in MBIM mode)
+        if [ "$reboot_ok" = "0" ] && [ -n "$QMICLI_BIN" ] && [ -n "$QMI_DEVICE" ] && [ -e "$QMI_DEVICE" ]; then
+            step "Trying QMI DMS Reset as fallback..."
+            "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --dms-set-operating-mode=offline >/dev/null 2>&1 || true
+            sleep 2
+            if "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --dms-set-operating-mode=reset >/dev/null 2>&1; then
+                ok "QMI Reboot command sent (fallback from MBIM)."
+                reboot_ok=1
+            fi
+        fi
+    else
+        # QMI reboot (original logic)
+        [ -n "$QMI_DEVICE" ] || die "QMI device is not set"
+        step "Executing QMI DMS Reset (Modem OS Reboot)..."
+        "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --dms-set-operating-mode=offline >/dev/null 2>&1 || true
+        sleep 2
+        if "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --dms-set-operating-mode=reset >/dev/null 2>&1; then
+            ok "QMI Reboot command sent successfully."
+            reboot_ok=1
+        fi
+    fi
+
+    # Common fallbacks: AT → USB sysfs
+    if [ "$reboot_ok" = "0" ]; then
+        warn "Primary reset failed. Trying AT fallback (AT+CFUN=1,1)..."
+        if [ -n "$AT_DEVICE" ] && [ -e "$AT_DEVICE" ]; then
+            step "Executing AT Reset on $AT_DEVICE..."
+            printf "AT+CFUN=1,1\r" > "$AT_DEVICE" 2>/dev/null
+            ok "AT Reboot command sent."
+            reboot_ok=1
+        fi
+    fi
+    if [ "$reboot_ok" = "0" ]; then
+        warn "AT fallback failed/unavailable. Attempting Nuclear USB Reset..."
+        if usb_nuclear_reset; then
+            ok "USB Sysfs Reset executed."
+            reboot_ok=1
+        else
+            fail "All reboot methods failed. Please physically replug the modem."
+            syslog_msg "Modem HARD REBOOT failed completely."
+            return 1
+        fi
+    fi
+
+    talk "Modem is rebooting. Waiting for USB interface to reappear..."
+    count=0
+    while [ ! -e "$wait_device" ] && [ $count -lt 60 ]; do
+        sleep 2; count=$((count + 2)); printf "."
+    done
+    printf "\n"
+    if [ -e "$wait_device" ]; then
+        ok "Modem interface ($wait_device) re-detected!"
+    else
+        warn "Timeout waiting for modem to reappear. Please verify manually."
+    fi
+}
+
+switch_profile() {
+    target="$1"; [ -n "$target" ] || die "Missing target"
+    talk "Gathering current profile data..."
+    pf="$(get_profiles_json)" || { fail "Failed to read profiles."; return 1; }
+    target_rec="$(profile_resolve_record "$pf" "$target")" || { fail "Target profile not found!"; return 1; }
+    active_rec="$(profile_get_active_record "$pf")"
+
+    old_IFS="$IFS"; IFS='|'; set -- $target_rec; IFS="$old_IFS"
+    target_iccid="$2"; target_aid="$3"; target_state="$4"; target_nick="$5"
+
+    active_iccid=""
+    if [ -n "$active_rec" ]; then IFS='|'; set -- $active_rec; IFS="$old_IFS"; active_iccid="$2"; active_nick="$5"; fi
+
+    info "Target to Enable : $target_nick"
+    info "Currently Active : ${active_nick:-None}"
+
+    if [ "$target_state" = "enabled" ] && [ "$target_iccid" = "$active_iccid" ]; then
+        ok "Profile is already active."; return 0
+    fi
+
+    # Skip confirmation in non-interactive / API mode
+    if [ "$NONINTERACTIVE" != "1" ]; then
+        hr; printf 'Ready to switch profiles. Continue? [y/N]: '; read ans
+        case "$ans" in y|Y|yes|YES) ;; *) info "Cancelled"; return 0 ;; esac
+    fi
+
+    syslog_msg "Initiating Safe Profile Switch to: $target_nick ($target_iccid)"
+
+    # Safe switch: ifdown → disconnect MM → enable with refreshflag → wait → ifup
+    step "Bringing down interface $MODEM_IFACE..."
+    ifdown "$MODEM_IFACE" >/dev/null 2>&1 || true
+    sleep 2
+
+    step "Disconnecting ModemManager bearers..."
+    disconnect_modemmanager
+    sleep 2
+
+    talk "Enabling target profile with refresh flag..."
+    tmp_out="${TMP_DIR}/profile-enable.json"
+    run_lpac_json_to_file "profile enable $(sq "$target_iccid") 1" "$tmp_out" 20
+    if [ "$(json_code "$tmp_out")" = "0" ]; then
+        ok "Target profile enabled successfully."
+    else
+        warn "Enable via ICCID failed, trying AID..."
+        if [ -n "$target_aid" ]; then
+            run_lpac_json_to_file "profile enable $(sq "$target_aid") 1" "$tmp_out" 20
+            if [ "$(json_code "$tmp_out")" = "0" ]; then
+                ok "Target profile enabled via AID."
+            else
+                fail "Critical Error: Unable to enable profile."
+                syslog_msg "Profile Switch FAILED | Target: $target_nick"
+                step "Bringing up interface $MODEM_IFACE..."
+                ifup "$MODEM_IFACE" >/dev/null 2>&1 || true
+                return 1
+            fi
+        else
+            fail "Critical Error: Unable to enable profile (no AID fallback)."
+            syslog_msg "Profile Switch FAILED | Target: $target_nick"
+            step "Bringing up interface $MODEM_IFACE..."
+            ifup "$MODEM_IFACE" >/dev/null 2>&1 || true
+            return 1
+        fi
+    fi
+
+    syslog_msg "Profile Switch SUCCESS | New Active: $target_nick ($target_iccid)"
+
+    step "Waiting for SIM refresh..."
+    sleep 8
+
+    step "Bringing up interface $MODEM_IFACE..."
+    ifup "$MODEM_IFACE" >/dev/null 2>&1 || true
+
+    ok "Profile switch complete."
+
+    # Skip live monitor in non-interactive / API mode
+    if [ "$NONINTERACTIVE" != "1" ]; then
+        talk "Entering Live Modem Monitor..."
+        monitor_modem_status
+    fi
+}
+
+disable_profile() {
+    target="$1"; [ -n "$target" ] || die "Missing target"
+    talk "Gathering current profile data..."
+    pf="$(get_profiles_json)" || { fail "Failed to read profiles."; return 1; }
+    target_rec="$(profile_resolve_record "$pf" "$target")" || { fail "Target profile not found!"; return 1; }
+
+    old_IFS="$IFS"; IFS='|'; set -- $target_rec; IFS="$old_IFS"
+    target_iccid="$2"; target_state="$4"; target_nick="$5"
+
+    if [ "$target_state" != "enabled" ]; then
+        ok "Profile is already disabled."; return 0
+    fi
+
+    syslog_msg "Disabling profile: $target_nick ($target_iccid)"
+
+    tmp_out="${TMP_DIR}/profile-disable.json"
+    run_lpac_json_to_file "profile disable $(sq "$target_iccid") 0" "$tmp_out" 20
+    if [ "$(json_code "$tmp_out")" = "0" ]; then
+        ok "Profile disabled successfully."
+        syslog_msg "Profile Disable SUCCESS | $target_nick ($target_iccid)"
+    else
+        fail "Failed to disable profile."
+        syslog_msg "Profile Disable FAILED | $target_nick ($target_iccid)"
+        return 1
+    fi
+}
+
+###############################################################################
+# API Mode — Helper functions
+###############################################################################
+
+# Emit a standard lpac-compatible JSON success envelope.
+# $1 = data object (raw JSON string), $2 = optional message
+api_ok() {
+    data="${1:-null}"; msg="${2:-success}"
+    printf '{"type":"lpa","payload":{"code":0,"message":"%s","data":%s}}\n' "$msg" "$data"
+}
+
+# Emit a standard JSON error envelope (safe string escaping via jq).
+# $1 = message/error code string, $2 = human-readable detail
+api_err() {
+    msg="${1:-error}"; detail="${2:-unknown error}"
+    "$JQ_BIN" -nc --arg m "$msg" --arg d "$detail" \
+        '{"type":"lpa","payload":{"code":-1,"message":$m,"data":{"msg":$d}}}' 2>/dev/null \
+        || printf '{"type":"lpa","payload":{"code":-1,"message":"%s","data":{"msg":"(jq unavailable)"}}}\n' "$msg"
+}
+
+# Check lock file. Returns 0 if clear, 1 (with JSON output) if locked.
+api_check_lock() {
+    if [ -f "$LOCK_FILE" ]; then
+        pid="$(cat "$LOCK_FILE" 2>/dev/null)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            api_err "locked" "Another operation is already in progress (PID: $pid)"
+            return 1
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+    return 0
+}
+
+# Write async result file, then remove lock. Call at end of every async worker.
+# $1 = "success" or "error", $2 = message string
+async_finish() {
+    status="${1:-error}"; msg="${2:-unknown}"
+    "$JQ_BIN" -nc --arg s "$status" --arg m "$msg" \
+        '{"success":($s == "success"),"message":$m}' > "$RESULT_FILE" 2>/dev/null
+    rm -f "$LOCK_FILE"
+}
+
+# Safe single-quote escaping for shell arguments
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+###############################################################################
+# API Mode — Commands
+###############################################################################
+
+# GET profiles list — passthrough of lpac JSON
+api_profiles() {
+    out="${TMP_DIR}/profiles.json"
+    if run_lpac_json_to_file "profile list" "$out" 20 && [ "$(json_code "$out")" = "0" ]; then
+        json_last_line "$out"
+    else
+        code="$(json_code "$out")"; msg="$(json_message "$out")"
+        [ -z "$code" ] && code="unknown"
+        [ -z "$msg" ] && msg="no response from lpac"
+        syslog_msg "ERROR: profile list failed (code: $code, message: $msg)"
+        api_err "lpac_error" "Failed to read profile list (lpac code: $code, $msg)"
+        return 1
+    fi
+}
+
+# GET chip info — passthrough of lpac JSON
+api_chip() {
+    out="${TMP_DIR}/chip.json"
+    if run_lpac_json_to_file "chip info" "$out" 10 && [ "$(json_code "$out")" = "0" ]; then
+        json_last_line "$out"
+    else
+        code="$(json_code "$out")"; msg="$(json_message "$out")"
+        [ -z "$code" ] && code="unknown"
+        [ -z "$msg" ] && msg="no response from lpac"
+        syslog_msg "ERROR: chip info failed (code: $code, message: $msg)"
+        api_err "lpac_error" "Failed to read chip info (lpac code: $code, $msg)"
+        return 1
+    fi
+}
+
+# GET notification list — passthrough of lpac JSON
+api_notif_list() {
+    out="${TMP_DIR}/notif-list.json"
+    if run_lpac_json_to_file "notification list" "$out" 15 && [ "$(json_code "$out")" = "0" ]; then
+        json_last_line "$out"
+    else
+        code="$(json_code "$out")"; msg="$(json_message "$out")"
+        [ -z "$code" ] && code="unknown"
+        [ -z "$msg" ] && msg="no response from lpac"
+        syslog_msg "ERROR: notification list failed (code: $code, message: $msg)"
+        api_err "lpac_error" "Failed to read notifications (lpac code: $code, $msg)"
+        return 1
+    fi
+}
+
+# POST notif-clear — offline wipe, always succeeds (empty queue is fine)
+api_notif_clear() {
+    out="${TMP_DIR}/notif-clear-api.json"
+    run_lpac_json_to_file "notification remove -a" "$out" 20
+    code="$(json_code "$out")"
+    if [ "$code" = "0" ]; then
+        api_ok '{"cleared":true}' "success"
+    else
+        # Code 1 usually means empty queue — not an error for us
+        api_ok '{"cleared":true,"note":"queue was empty or already clear"}' "success"
+    fi
+}
+
+# GET modem-status — parse mmcli text output, return as JSON
+api_modem_status() {
+    if [ -z "$MMCLI_BIN" ]; then
+        api_err "no_mmcli" "mmcli binary not available on this system"
+        return 1
+    fi
+    idx="$(detect_modem_index)"
+    if [ -z "$idx" ]; then
+        api_ok '{"available":false,"state":"not_detected"}' "no_modem"
+        return 0
+    fi
+    out="${TMP_DIR}/mmcli-modem-${idx}.txt"
+    "$MMCLI_BIN" -m "$idx" > "$out" 2>/dev/null || {
+        api_err "mmcli_error" "Failed to read modem details from mmcli"
+        return 1
+    }
+    m_model="$(mm_field "$out" "model")"
+    m_op="$(mm_field "$out" "operator name")"
+    m_st="$(mm_field "$out" "state")"
+    m_sig="$(mm_field "$out" "signal quality")"
+    m_tech="$(mm_field "$out" "access tech")"
+    # Use jq for safe JSON construction (handles operator names with special chars)
+    "$JQ_BIN" -nc \
+        --arg idx   "$idx" \
+        --arg model "$m_model" \
+        --arg state "$m_st" \
+        --arg op    "$m_op" \
+        --arg tech  "$m_tech" \
+        --arg sig   "$m_sig" \
+        '{"type":"lpa","payload":{"code":0,"message":"success","data":{"available":true,"modem_index":$idx,"model":$model,"state":$state,"operator":$op,"access_tech":$tech,"signal_quality":$sig}}}'
+}
+
+# GET lock-status — for frontend polling to know when a background op is done
+api_lock_status() {
+    if [ -f "$LOCK_FILE" ]; then
+        pid="$(cat "$LOCK_FILE" 2>/dev/null)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            api_ok "{\"locked\":true,\"pid\":$pid}" "processing"
+            return 0
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+    # Include last async result if available
+    if [ -f "$RESULT_FILE" ]; then
+        result="$(cat "$RESULT_FILE" 2>/dev/null)"
+        rm -f "$RESULT_FILE"
+        api_ok "{\"locked\":false,\"last_result\":$result}" "idle"
+    else
+        api_ok '{"locked":false,"last_result":null}' "idle"
+    fi
+}
+
+# POST switch <iccid> — async, returns immediately with processing status
+api_switch() {
+    iccid="$1"
+    [ -z "$iccid" ] && api_err "missing_param" "ICCID parameter is required" && return 1
+
+    api_check_lock || return 1
+
+    # Validate profile exists before going async (fast fail)
+    pf="$(get_profiles_json)" || { api_err "lpac_error" "Failed to read profiles"; return 1; }
+    rec="$(profile_resolve_record "$pf" "$iccid")"
+    if [ -z "$rec" ]; then
+        api_err "not_found" "Profile not found: $iccid"
+        return 1
+    fi
+
+    old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"
+    t_iccid="$2"; t_state="$4"; t_nick="$5"
+
+    # Already active — no-op, return immediately
+    if [ "$t_state" = "enabled" ]; then
+        "$JQ_BIN" -nc --arg iccid "$t_iccid" --arg nick "$t_nick" \
+            '{"type":"lpa","payload":{"code":0,"message":"already_active","data":{"iccid":$iccid,"nickname":$nick}}}'
+        return 0
+    fi
+
+    syslog_msg "API: Profile switch initiated | Target: $t_nick ($t_iccid)"
+
+    # Launch in background — NONINTERACTIVE=1 skips confirmation and live monitor
+    NONINTERACTIVE=1
+    (
+        QUIET=1; NONINTERACTIVE=1
+        if switch_profile "$t_iccid" >> "$LOG_FILE" 2>&1; then
+            async_finish "success" "Profile switched to $t_nick ($t_iccid)"
+        else
+            async_finish "error" "Profile switch failed for $t_iccid"
+        fi
+        syslog_msg "API: Profile switch background job completed | $t_iccid"
+    ) >/dev/null 2>&1 &
+    bgpid=$!
+    NONINTERACTIVE=0
+
+    printf '%s\n' "$bgpid" > "$LOCK_FILE"
+
+    "$JQ_BIN" -nc \
+        --arg iccid  "$t_iccid" \
+        --arg nick   "$t_nick" \
+        --argjson pid "$bgpid" \
+        '{"type":"lpa","payload":{"code":0,"message":"processing","data":{"status":"switching","iccid":$iccid,"nickname":$nick,"pid":$pid,"poll_url":"lock-status"}}}'
+    return 0
+}
+
+# POST disable <iccid> — disable an active profile
+api_disable() {
+    iccid="$1"
+    [ -z "$iccid" ] && api_err "missing_param" "ICCID parameter is required" && return 1
+
+    api_check_lock || return 1
+
+    # Validate profile exists
+    pf="$(get_profiles_json)" || { api_err "lpac_error" "Failed to read profiles"; return 1; }
+    rec="$(profile_resolve_record "$pf" "$iccid")"
+    if [ -z "$rec" ]; then
+        api_err "not_found" "Profile not found: $iccid"
+        return 1
+    fi
+
+    old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"
+    t_iccid="$2"; t_state="$4"; t_nick="$5"
+
+    # Already disabled — no-op
+    if [ "$t_state" != "enabled" ]; then
+        "$JQ_BIN" -nc --arg iccid "$t_iccid" --arg nick "$t_nick" \
+            '{"type":"lpa","payload":{"code":0,"message":"already_disabled","data":{"iccid":$iccid,"nickname":$nick}}}'
+        return 0
+    fi
+
+    syslog_msg "API: Profile disable initiated | Target: $t_nick ($t_iccid)"
+
+    out="${TMP_DIR}/disable.json"
+    run_lpac_json_to_file "profile disable $(sq "$t_iccid") 0" "$out" 20
+    if [ "$(json_code "$out")" = "0" ]; then
+        syslog_msg "API: Profile disabled successfully: $t_nick ($t_iccid)"
+        "$JQ_BIN" -nc --arg iccid "$t_iccid" --arg nick "$t_nick" \
+            '{"type":"lpa","payload":{"code":0,"message":"success","data":{"disabled":true,"iccid":$iccid,"nickname":$nick}}}'
+    else
+        api_err "disable_failed" "Failed to disable profile $t_iccid"
+        return 1
+    fi
+}
+
+# POST reboot — async hard reboot, returns immediately
+api_reboot() {
+    api_check_lock || return 1
+
+    # Ensure we have a device for the selected backend
+    if [ "$BACKEND" = "mbim" ]; then
+        [ -z "$MBIM_DEVICE" ] && api_err "no_device" "MBIM device not configured" && return 1
+    else
+        [ -z "$QMI_DEVICE" ] && api_err "no_device" "QMI device not configured" && return 1
+    fi
+
+    syslog_msg "API: Hard reboot initiated"
+
+    (
+        QUIET=1; NONINTERACTIVE=1
+        if reboot_modem_hard >> "$LOG_FILE" 2>&1; then
+            async_finish "success" "Modem rebooted successfully"
+        else
+            async_finish "error" "Modem reboot failed"
+        fi
+        syslog_msg "API: Hard reboot background job completed"
+    ) >/dev/null 2>&1 &
+    bgpid=$!
+
+    printf '%s\n' "$bgpid" > "$LOCK_FILE"
+
+    "$JQ_BIN" -nc --argjson pid "$bgpid" \
+        '{"type":"lpa","payload":{"code":0,"message":"processing","data":{"status":"rebooting","pid":$pid,"poll_url":"lock-status"}}}'
+    return 0
+}
+
+# POST download — async profile download from SM-DP+ server
+# Accepts: --lpa "LPA:1$..." OR --smdp server --matching-id code
+# Optional: --confirmation code
+api_download() {
+    api_check_lock || return 1
+
+    # Build lpac download command
+    local dl_cmd="profile download"
+
+    if [ -n "$DL_LPA" ]; then
+        # LPA activation string takes precedence
+        dl_cmd="$dl_cmd -a $(printf '%s' "$DL_LPA" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+    elif [ -n "$DL_SMDP" ] && [ -n "$DL_MATCHID" ]; then
+        dl_cmd="$dl_cmd -s $(printf '%s' "$DL_SMDP" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+        dl_cmd="$dl_cmd -m $(printf '%s' "$DL_MATCHID" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+    else
+        api_err "missing_param" "Provide --lpa 'LPA:1\$...' or --smdp server --matching-id code"
+        return 1
+    fi
+
+    if [ -n "$DL_CONFIRM" ]; then
+        dl_cmd="$dl_cmd -c $(printf '%s' "$DL_CONFIRM" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+    fi
+
+    syslog_msg "API: Profile download initiated"
+
+    # Download can take 60-120s — run async
+    (
+        QUIET=1; NONINTERACTIVE=1
+
+        # Workaround: mbedTLS on OpenWrt may fail TLS verification for SM-DP+ servers
+        _curlrc_tmp=""
+        if [ ! -f /root/.curlrc ]; then
+            echo "insecure" > /root/.curlrc
+            _curlrc_tmp="1"
+            trap 'rm -f /root/.curlrc' EXIT HUP INT TERM
+        fi
+
+        out="${TMP_DIR}/download.json"
+        run_lpac_json_to_file "$dl_cmd" "$out" 120
+        code="$(json_code "$out")"
+        msg="$(json_message "$out")"
+
+        # Clean up temporary .curlrc (also handled by trap)
+        [ "$_curlrc_tmp" = "1" ] && rm -f /root/.curlrc
+
+        if [ "$code" = "0" ]; then
+            async_finish "success" "Profile downloaded successfully"
+            syslog_msg "API: Profile download completed successfully"
+        else
+            [ -z "$msg" ] && msg="no lpac message"
+            async_finish "error" "Profile download failed (lpac code: ${code:-unknown}, $msg)"
+            syslog_msg "API: Profile download FAILED (code: ${code:-unknown}, message: $msg)"
+            syslog_msg "API: Download output: $(cat "$out" 2>/dev/null | head -c 500)"
+        fi
+    ) >/dev/null 2>&1 &
+    bgpid=$!
+
+    printf '%s\n' "$bgpid" > "$LOCK_FILE"
+
+    "$JQ_BIN" -nc --argjson pid "$bgpid" \
+        '{"type":"lpa","payload":{"code":0,"message":"processing","data":{"status":"downloading","pid":$pid,"poll_url":"lock-status"}}}'
+    return 0
+}
+
+# POST delete <iccid> — delete a disabled profile (irreversible!)
+api_delete() {
+    iccid="$1"
+    [ -z "$iccid" ] && api_err "missing_param" "ICCID parameter is required" && return 1
+
+    # Verify profile exists and is disabled
+    pf="$(get_profiles_json)" || { api_err "lpac_error" "Failed to read profiles"; return 1; }
+    rec="$(profile_resolve_record "$pf" "$iccid")"
+    if [ -z "$rec" ]; then
+        api_err "not_found" "Profile not found: $iccid"
+        return 1
+    fi
+
+    old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"
+    t_iccid="$2"; t_state="$4"; t_nick="$5"
+
+    if [ "$t_state" = "enabled" ]; then
+        api_err "profile_active" "Cannot delete active profile. Disable it first."
+        return 1
+    fi
+
+    syslog_msg "API: Deleting profile $t_nick ($t_iccid)"
+
+    out="${TMP_DIR}/delete.json"
+    if run_lpac_json_to_file "profile delete $(sq "$t_iccid")" "$out" 30 && [ "$(json_code "$out")" = "0" ]; then
+        syslog_msg "API: Profile deleted successfully: $t_nick ($t_iccid)"
+        "$JQ_BIN" -nc --arg iccid "$t_iccid" --arg nick "$t_nick" \
+            '{"type":"lpa","payload":{"code":0,"message":"success","data":{"deleted":true,"iccid":$iccid,"nickname":$nick}}}'
+    else
+        api_err "delete_failed" "Failed to delete profile $t_iccid"
+        return 1
+    fi
+}
+
+# POST nickname <iccid> --nickname <name> — rename a profile
+api_nickname() {
+    iccid="$1"; nickname="$DL_NICKNAME"
+    [ -z "$iccid" ] && api_err "missing_param" "ICCID parameter is required" && return 1
+    [ -z "$nickname" ] && api_err "missing_param" "Nickname is required (--nickname)" && return 1
+
+    out="${TMP_DIR}/nickname.json"
+    if run_lpac_json_to_file "profile nickname $(sq "$iccid") $(sq "$nickname")" "$out" 15 && [ "$(json_code "$out")" = "0" ]; then
+        syslog_msg "API: Profile renamed: $iccid -> $nickname"
+        "$JQ_BIN" -nc --arg iccid "$iccid" --arg nick "$nickname" \
+            '{"type":"lpa","payload":{"code":0,"message":"success","data":{"iccid":$iccid,"nickname":$nick}}}'
+    else
+        api_err "rename_failed" "Failed to rename profile $iccid"
+        return 1
+    fi
+}
+
+# POST notif-process — send all pending notifications to operators (requires internet)
+api_notif_process() {
+    api_check_lock || return 1
+
+    syslog_msg "API: Notification process-all initiated"
+
+    (
+        QUIET=1; NONINTERACTIVE=1
+        out="${TMP_DIR}/notif-process.json"
+        run_lpac_json_to_file "notification process -a -r" "$out" 60
+        code="$(json_code "$out")"
+        if [ "$code" = "0" ]; then
+            async_finish "success" "Notifications processed and removed"
+            syslog_msg "API: Notifications processed and removed successfully"
+        else
+            async_finish "error" "Notification processing failed (lpac code: ${code:-unknown})"
+            syslog_msg "API: Notification processing failed (code: ${code:-unknown})"
+        fi
+    ) >/dev/null 2>&1 &
+    bgpid=$!
+
+    printf '%s\n' "$bgpid" > "$LOCK_FILE"
+
+    "$JQ_BIN" -nc --argjson pid "$bgpid" \
+        '{"type":"lpa","payload":{"code":0,"message":"processing","data":{"status":"processing_notifications","pid":$pid,"poll_url":"lock-status"}}}'
+    return 0
+}
+
+# GET syslog — filtered log entries for diagnostics
+api_syslog() {
+    lines="${1:-100}"
+    log="$(logread 2>/dev/null | grep -i 'lpac-esim\|lpac\|modem\|ModemManager\|netifd.*modem\|qmi\|mbim\|usb.*[0-9]-[0-9]' | tail -n "$lines")"
+    "$JQ_BIN" -nc --arg log "$log" \
+        '{"type":"lpa","payload":{"code":0,"message":"success","data":{"log":$log}}}'
+}
+
+# GET runlog — backend initialization log + device enumeration
+api_runlog() {
+    log=""
+    if [ -f "$LOG_FILE" ]; then
+        log="$(tail -c 16384 "$LOG_FILE" 2>/dev/null)"
+    fi
+    # Append live device enumeration
+    devinfo=""
+    devinfo="${devinfo}\n--- USB Devices ---\n$(lsusb 2>/dev/null || echo '(lsusb not available)')"
+    devinfo="${devinfo}\n--- TTY Ports ---\n$(ls -1 /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || echo '(none found)')"
+    devinfo="${devinfo}\n--- CDC Devices ---\n$(ls -1 /dev/cdc-wdm* /dev/wwan* 2>/dev/null || echo '(none found)')"
+    devinfo="${devinfo}\n--- Network Interfaces ---\n$(ls -1 /sys/class/net/ 2>/dev/null | grep -E 'wwan|usb|mbim' || echo '(none found)')"
+    log="${log}\n\n$(printf '%s' "$devinfo")"
+
+    "$JQ_BIN" -nc --arg log "$(printf '%b' "$log")" \
+        '{"type":"lpa","payload":{"code":0,"message":"success","data":{"log":$log}}}'
+}
+
+# GET version — package and component versions
+api_version() {
+    local lpac_ver=""
+    if [ -n "$LPAC_BIN" ]; then
+        lpac_ver="$($LPAC_BIN version 2>/dev/null | "$JQ_BIN" -r '.payload.data // "unknown"' 2>/dev/null)"
+    fi
+    [ -z "$lpac_ver" ] && lpac_ver="missing"
+    local script_ver="$APP_VER"
+    local be="${BACKEND:-unknown}"
+    local dev=""
+    case "$be" in
+        qmi)  dev="${QMI_DEVICE:-?}" ;;
+        mbim) dev="${MBIM_DEVICE:-?}" ;;
+        at)   dev="${AT_DEVICE:-?}" ;;
+    esac
+    "$JQ_BIN" -nc \
+        --arg sv "$script_ver" \
+        --arg lv "$lpac_ver" \
+        --arg be "$be" \
+        --arg dev "$dev" \
+        --arg at "${AT_DEVICE:-none}" \
+        --arg qmi "${QMI_DEVICE:-none}" \
+        --arg mbim "${MBIM_DEVICE:-none}" \
+        '{"type":"lpa","payload":{"code":0,"message":"success","data":{"script_version":$sv,"lpac_version":$lv,"backend":$be,"device":$dev,"at_device":$at,"qmi_device":$qmi,"mbim_device":$mbim}}}'
+}
+
+# POST at-cmd <command> — send AT command to serial port, return response
+api_at_cmd() {
+    local cmd="$1"
+    [ -z "$cmd" ] && cmd="ATI"
+
+    # Determine AT device
+    local port="$AT_DEVICE"
+    [ -z "$port" ] && port="$(uci -q get lpac-esim.main.at_device 2>/dev/null)" || true
+    [ -z "$port" ] && port="/dev/ttyACM0"
+    if [ ! -c "$port" ]; then
+        api_err "no_device" "AT device $port not found. Check Device Settings or run: ls /dev/ttyACM* /dev/ttyUSB*"
+        return 1
+    fi
+
+    # Sanitize command — allow only printable ASCII, strip dangerous chars
+    cmd="$(printf '%s' "$cmd" | tr -d '\000-\010\013\014\016-\037\177' | head -c 200)"
+
+    local resp=""
+
+    if command -v atinout >/dev/null 2>&1; then
+        resp="$(echo "$cmd" | atinout - "$port" - 2>&1)"
+    elif command -v sms_tool >/dev/null 2>&1; then
+        resp="$(sms_tool at "$cmd" -d "$port" 2>&1)"
+    elif command -v microcom >/dev/null 2>&1; then
+        resp="$(printf '%s\r\n' "$cmd" | microcom -t 3000 "$port" 2>/dev/null)"
+    elif command -v socat >/dev/null 2>&1; then
+        resp="$(echo "$cmd" | socat - "$port",crnl,rawer,b115200,echo=0,cr,readbytes=4096,nonblock=1 2>/dev/null)"
+    else
+        # BusyBox raw serial fallback (no extra packages needed)
+        stty -F "$port" 115200 raw -echo 2>/dev/null || stty -F "$port" raw -echo 2>/dev/null || true
+        resp="$(
+            exec 3<>"$port" 2>/dev/null || exit 1
+            printf '%s\r' "$cmd" >&3
+            sleep 2
+            dd bs=4096 count=1 <&3 2>/dev/null || cat <&3 &
+            _cpid=$!; sleep 1; kill $_cpid 2>/dev/null
+            exec 3>&-
+        )" || {
+            api_err "tool_missing" "Cannot access $port. Install atinout (opkg install atinout) or sms-tool (opkg install sms-tool)."
+            return 1
+        }
+    fi
+
+    # Clean up response: remove echo of command, CR, blank lines
+    resp="$(printf '%s' "$resp" | tr '\r' '\n' | sed '/^$/d' | grep -v "^${cmd}$" )"
+
+    local at_code=0 at_msg="success"
+    if [ -z "$resp" ]; then
+        at_code=-1; at_msg="no_response"
+    fi
+
+    "$JQ_BIN" -nc \
+        --argjson code "$at_code" \
+        --arg msg "$at_msg" \
+        --arg cmd "$cmd" \
+        --arg resp "${resp:-(no response from modem)}" \
+        --arg port "$port" \
+        '{"type":"lpa","payload":{"code":$code,"message":$msg,"data":{"command":$cmd,"response":$resp,"port":$port}}}'
+}
+
+# POST soft-reset — QMI DMS offline+online (no USB re-enum)
+api_soft_reset() {
+    api_check_lock || return 1
+    if [ "$BACKEND" = "mbim" ] && [ -n "$MBIMCLI_BIN" ] && [ -e "$MBIM_DEVICE" ]; then
+        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=off >/dev/null 2>&1
+        sleep 2
+        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --set-radio-state=on >/dev/null 2>&1
+        syslog_msg "API: Soft reset via MBIM radio toggle"
+        api_ok '{"method":"mbim_radio"}' "success"
+    elif [ -n "$QMICLI_BIN" ] && [ -n "$QMI_DEVICE" ] && [ -e "$QMI_DEVICE" ]; then
+        "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --dms-set-operating-mode=offline >/dev/null 2>&1
+        sleep 2
+        "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --dms-set-operating-mode=online >/dev/null 2>&1
+        syslog_msg "API: Soft reset via QMI DMS offline/online"
+        api_ok '{"method":"qmi_dms"}' "success"
+    elif [ -n "$AT_DEVICE" ] && [ -e "$AT_DEVICE" ]; then
+        printf "AT+CFUN=0\r" > "$AT_DEVICE" 2>/dev/null
+        sleep 2
+        printf "AT+CFUN=1\r" > "$AT_DEVICE" 2>/dev/null
+        syslog_msg "API: Soft reset via AT+CFUN=0/1"
+        api_ok '{"method":"at_cfun"}' "success"
+    else
+        api_err "no_device" "No suitable device for soft reset"
+    fi
+}
+
+# POST usb-reset — sysfs USB port re-enumeration (nuclear option)
+api_usb_reset() {
+    api_check_lock || return 1
+    dev="${QMI_DEVICE:-$MBIM_DEVICE}"
+    [ -z "$dev" ] && api_err "no_device" "No QMI/MBIM device configured" && return 1
+    base="${dev##*/}"
+    sys_path="/sys/class/usbmisc/$base/device/.."
+    real_path="$(readlink -f "$sys_path" 2>/dev/null)"
+    [ -z "$real_path" ] && real_path="$sys_path"
+    if [ -e "$real_path/authorized" ]; then
+        syslog_msg "API: USB port re-init via sysfs on $real_path"
+        echo 0 > "$real_path/authorized"
+        sleep 3
+        echo 1 > "$real_path/authorized"
+        api_ok '{"method":"usb_sysfs"}' "success"
+    else
+        api_err "sysfs_error" "Cannot find USB authorized path for $base"
+    fi
+}
+
+# POST uicc-reset — SIM power cycle via QMI UIM
+api_uicc_reset() {
+    api_check_lock || return 1
+    slot="${QMI_SLOT:-1}"
+    if [ -n "$QMICLI_BIN" ] && [ -n "$QMI_DEVICE" ] && [ -e "$QMI_DEVICE" ]; then
+        syslog_msg "API: UICC SIM reset (power cycle slot $slot)"
+        "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --uim-sim-power-off="$slot" >/dev/null 2>&1
+        sleep 2
+        "$QMICLI_BIN" -d "$QMI_DEVICE" --device-open-proxy --uim-sim-power-on="$slot" >/dev/null 2>&1
+        api_ok "{\"method\":\"qmi_uim\",\"slot\":$slot}" "success"
+    elif [ -n "$MBIMCLI_BIN" ] && [ -n "$MBIM_DEVICE" ] && [ -e "$MBIM_DEVICE" ]; then
+        syslog_msg "API: UICC SIM reset via MBIM"
+        TERM=dumb "$MBIMCLI_BIN" -d "$MBIM_DEVICE" --ms-set-uicc-reset=0 >/dev/null 2>&1
+        sleep 2
+        api_ok '{"method":"mbim_uicc"}' "success"
+    else
+        api_err "no_device" "No QMI/MBIM device for UICC reset"
+    fi
+}
+
+###############################################################################
+# Menus (interactive)
+###############################################################################
+
+pick_profile_from_table() {
+    SELECTED_TARGET=""
+    pf="$(get_profiles_json)" || { fail "Failed to read profiles."; return 1; }
+    print_profiles_table "$pf" || return 1
+    printf 'Enter ID, ICCID or AID (or q to cancel): '
+    read ans
+    [ -z "$ans" ] && return 1
+    case "$ans" in q|Q|quit|exit|0) info "Action cancelled."; return 1 ;; esac
+    SELECTED_TARGET="$ans"; return 0
+}
+
+menu_profiles() {
+    while :; do
+        title; say "  [ Profile Management ]"; hr
+        say "  1) List profiles"
+        say "  2) Switch active profile (Apply & Reboot)"
+        say "  3) Enable profile (Manual, No Refresh)"
+        say "  4) Disable profile (Manual)"
+        say "  5) Rename profile"
+        say "  6) Delete profile (disabled only)"
+        say "  7) Download new eSIM profile"
+        say "  0) Back to Main Menu"
+        say "  q) Exit to Shell"
+        hr
+        printf 'Select: '; read choice
+        case "$choice" in
+            1) talk "Reading chip..."; pf="$(get_profiles_json)" && print_profiles_table "$pf" || fail "Read failed." ;;
+            2) if pick_profile_from_table; then switch_profile "$SELECTED_TARGET"; fi ;;
+            3) if pick_profile_from_table; then
+                pf="$(get_profiles_json)"; rec="$(profile_resolve_record "$pf" "$SELECTED_TARGET")"
+                old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"
+                try_profile_action_variants "enable" "enabled" "$2" "$3"
+               fi ;;
+            4) if pick_profile_from_table; then
+                pf="$(get_profiles_json)"; rec="$(profile_resolve_record "$pf" "$SELECTED_TARGET")"
+                old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"
+                try_profile_action_variants "disable" "disabled" "$2" "$3"
+               fi ;;
+            5) tui_rename_profile ;;
+            6) tui_delete_profile ;;
+            7) tui_download_profile ;;
+            0) return 0 ;;
+            q|Q|quit|exit) exit 0 ;;
+            *) warn "Unknown choice" ;;
+        esac
+    done
+}
+
+menu_status() {
+    while :; do
+        title; say "  [ Status & Diagnostics ]"; hr
+        say "  1) eUICC Chip Info"
+        say "  2) Live Modem Monitor"
+        say "  3) Full Status Dump"
+        say "  0) Back to Main Menu"
+        say "  q) Exit to Shell"
+        hr
+        printf 'Select: '; read choice
+        case "$choice" in
+            1) talk "Reading chip info..."; chipf="$(get_chip_info_json)" && print_chip_summary "$chipf" || fail "Failed." ;;
+            2) monitor_modem_status ;;
+            3) talk "Gathering all data..."; chipf="$(get_chip_info_json)" && print_chip_summary "$chipf"; pf="$(get_profiles_json)" && print_profiles_table "$pf"; print_modem_status ;;
+            0) return 0 ;;
+            q|Q|quit|exit) exit 0 ;;
+            *) warn "Unknown choice" ;;
+        esac
+    done
+}
+
+menu_maintenance() {
+    while :; do
+        title; say "  [ Maintenance & Resets ]"; hr
+        say "  1) Reboot Modem (OS Reset / Hard Restart)"
+        say "  2) Nuclear USB Port Reset (Sysfs Drop)"
+        say "  3) Clear Pending Notifications (Offline wipe)"
+        say "  4) Process & Remove Notifications (Online)"
+        say "  5) Select Devices (QMI / AT)"
+        say "  6) Doctor (Environment Check)"
+        say "  0) Back to Main Menu"
+        say "  q) Exit to Shell"
+        hr
+        printf 'Select: '; read choice
+        case "$choice" in
+            1) reboot_modem_hard ;;
+            2) usb_nuclear_reset ;;
+            3) notif_clear_queue ;;
+            4) talk "Processing notifications..."; out="${TMP_DIR}/notif-proc.json"; run_lpac_json_to_file "notification process -a -r" "$out" 60 && ok "Notifications processed and removed." || warn "Processing failed." ;;
+            5) select_qmi_device; select_at_port ;;
+            6) title; info "OS  : $(uname -a 2>/dev/null)"; check_required_tools; check_lpac_version; info "Backend: $BACKEND (QMI: ${QMI_DEVICE:-none}, AT: ${AT_DEVICE:-none}, MBIM: ${MBIM_DEVICE:-none})"
+               if [ "$BACKEND" = "mbim" ]; then
+                   if pidof mbim-proxy >/dev/null 2>&1; then ok "mbim-proxy is running"
+                   else warn "mbim-proxy is NOT running (may be needed for MBIM mode)"; fi
+               fi ;;
+            0) return 0 ;;
+            q|Q|quit|exit) exit 0 ;;
+            *) warn "Unknown choice" ;;
+        esac
+    done
+}
+
+interactive_menu() {
+    while :; do
+        title; say "  1) Profile Management"
+        say "  2) Status & Diagnostics"
+        say "  3) Maintenance & Resets"
+        say "  q) Exit to Shell"
+        hr
+        printf 'Select category: '; read cat
+        case "$cat" in
+            1) menu_profiles ;;
+            2) menu_status ;;
+            3) menu_maintenance ;;
+            q|Q|quit|exit) exit 0 ;;
+            *) warn "Unknown category"; sleep 1 ;;
+        esac
+    done
+}
+
+# ── TUI: Rename Profile ──────────────────────────────────────────────────
+tui_rename_profile() {
+    title; say "  [ Rename eSIM Profile ]"; hr
+    if ! pick_profile_from_table; then return 1; fi
+    pf="$(get_profiles_json)"; rec="$(profile_resolve_record "$pf" "$SELECTED_TARGET")"
+    [ -z "$rec" ] && fail "Profile not found." && return 1
+    old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"
+    local p_iccid="$2" p_nick="$5"
+    info "Current nickname: ${p_nick:-<none>}"
+    printf 'Enter new nickname (max 64 chars): '; read new_nick
+    [ -z "$new_nick" ] && warn "Empty nickname, cancelled." && return 1
+    [ ${#new_nick} -gt 64 ] && warn "Nickname too long (max 64)." && return 1
+    talk "Renaming..."
+    out="${TMP_DIR}/nick.json"
+    if run_lpac_json_to_file "profile nickname $(sq "$p_iccid") $(sq "$new_nick")" "$out" 15 && [ "$(json_code "$out")" = "0" ]; then
+        ok "Profile renamed to \"$new_nick\""
+        syslog_msg "TUI: Profile renamed $p_iccid -> $new_nick"
+    else
+        fail "Rename failed."
+    fi
+}
+
+# ── TUI: Delete Profile ──────────────────────────────────────────────────
+tui_delete_profile() {
+    title; say "  [ Delete eSIM Profile ]"; hr
+    warn "Only DISABLED profiles can be deleted. This is IRREVERSIBLE!"
+    hr
+    if ! pick_profile_from_table; then return 1; fi
+    pf="$(get_profiles_json)"; rec="$(profile_resolve_record "$pf" "$SELECTED_TARGET")"
+    [ -z "$rec" ] && fail "Profile not found." && return 1
+    old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"
+    local p_iccid="$2" p_state="$4" p_nick="$5"
+    if [ "$p_state" = "enabled" ]; then
+        fail "Cannot delete ENABLED profile. Disable it first."
+        return 1
+    fi
+    say ""
+    warn "Profile: ${p_nick} (${p_iccid})"
+    printf 'Type DELETE to confirm: '; read confirm
+    if [ "$confirm" != "DELETE" ]; then
+        info "Cancelled."
+        return 0
+    fi
+    talk "Deleting profile..."
+    out="${TMP_DIR}/delete.json"
+    if run_lpac_json_to_file "profile delete $(sq "$p_iccid")" "$out" 30 && [ "$(json_code "$out")" = "0" ]; then
+        ok "Profile deleted."
+        syslog_msg "TUI: Profile deleted $p_nick ($p_iccid)"
+    else
+        code="$(json_code "$out")"; msg="$(json_message "$out")"
+        fail "Delete failed (lpac code: ${code:-unknown}, ${msg:-no message})"
+    fi
+}
+
+# ── TUI: Download eSIM Profile ───────────────────────────────────────────
+tui_download_profile() {
+    title; say "  [ Download eSIM Profile ]"; hr
+    say "  1) Enter full LPA activation code (LPA:1\$...)"
+    say "  2) Enter SM-DP+ address and Matching ID separately"
+    hr
+    printf 'Choice [1]: '; read dl_choice
+    [ -z "$dl_choice" ] && dl_choice="1"
+
+    local dl_cmd="" dl_server=""
+
+    if [ "$dl_choice" = "1" ]; then
+        printf 'LPA code: '; read lpa_code
+        [ -z "$lpa_code" ] && warn "Empty code, cancelled." && return 1
+        case "$lpa_code" in
+            LPA:1\$*) ;;
+            *) warn "Invalid format. Must start with LPA:1\$"; return 1 ;;
+        esac
+        dl_cmd="profile download -a $(sq "$lpa_code")"
+        dl_server="$(echo "$lpa_code" | cut -d'$' -f2)"
+    elif [ "$dl_choice" = "2" ]; then
+        printf 'SM-DP+ address: '; read smdp
+        [ -z "$smdp" ] && warn "Empty address, cancelled." && return 1
+        printf 'Matching ID: '; read matchid
+        [ -z "$matchid" ] && warn "Empty Matching ID, cancelled." && return 1
+        dl_cmd="profile download -s $(sq "$smdp") -m $(sq "$matchid")"
+        dl_server="$smdp"
+    else
+        warn "Invalid choice."; return 1
+    fi
+
+    printf 'Confirmation code (optional, Enter to skip): '; read conf_code
+    [ -n "$conf_code" ] && dl_cmd="$dl_cmd -c $(sq "$conf_code")"
+
+    say ""
+    info "Downloading profile from ${dl_server}..."
+    info "This may take 60-120 seconds..."
+    syslog_msg "TUI: Profile download initiated from $dl_server"
+
+    # Workaround: mbedTLS TLS verification issue on OpenWrt
+    _curlrc_tmp=""
+    if [ ! -f /root/.curlrc ]; then
+        echo "insecure" > /root/.curlrc
+        _curlrc_tmp="1"
+        trap '[ "$_curlrc_tmp" = "1" ] && rm -f /root/.curlrc' EXIT HUP INT TERM
+    fi
+
+    out="${TMP_DIR}/download.json"
+    if run_lpac_json_to_file "$dl_cmd" "$out" 120 && [ "$(json_code "$out")" = "0" ]; then
+        [ "$_curlrc_tmp" = "1" ] && rm -f /root/.curlrc
+        ok "Profile downloaded successfully!"
+        syslog_msg "TUI: Profile download completed from $dl_server"
+    else
+        [ "$_curlrc_tmp" = "1" ] && rm -f /root/.curlrc
+        code="$(json_code "$out")"; msg="$(json_message "$out")"
+        fail "Download failed (lpac code: ${code:-unknown}, ${msg:-no message})"
+        syslog_msg "TUI: Profile download FAILED from $dl_server (code: ${code:-unknown}, $msg)"
+    fi
+}
+
+# ── Backend Selection (interactive startup) ──────────────────────────────
+select_backend_interactive() {
+    say ""; say "  Select APDU backend:"
+    say "  1) QMI  (${QMI_DEVICE:-/dev/cdc-wdm0})"
+    say "  2) MBIM (${MBIM_DEVICE:-/dev/cdc-wdm0})"
+    say "  3) AT   (${AT_DEVICE:-/dev/ttyACM0})"
+    say "  0) Use config default (${BACKEND:-qmi})"
+    hr
+    printf 'Enter choice [0]: '; read be_choice
+    case "$be_choice" in
+        1) BACKEND="qmi";  info "Backend set to QMI" ;;
+        2) BACKEND="mbim"; info "Backend set to MBIM"
+           [ -z "$MBIM_DEVICE" ] && MBIM_DEVICE="/dev/cdc-wdm0"
+           ;;
+        3) BACKEND="at";   info "Backend set to AT" ;;
+        0|"") info "Using config default: $BACKEND" ;;
+        *) warn "Invalid, using default: $BACKEND" ;;
+    esac
+}
+
+###############################################################################
+# Main
+###############################################################################
+
+main() {
+    init_colors
+    load_uci_config
+    parse_args "$@"
+    mkdir -p "$TMP_DIR" >/dev/null 2>&1
+
+    # ── API MODE ────────────────────────────────────────────────────────────
+    # Minimal setup: no banners, no interactive prompts, JSON-only output.
+    if [ "$API_MODE" = "1" ]; then
+        # Unset proxy — lpac/curl must connect directly to SM-DP+ servers
+        unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+        # ALWAYS init tool paths (critical — JQ_BIN etc must be set every call)
+        init_tools_runtime
+        # Only write verbose log to run.log when stale (>1 hour) or missing
+        if [ ! -f "$LOG_FILE" ] || [ "$(find "$LOG_FILE" -mmin +60 2>/dev/null)" ]; then
+            : > "$LOG_FILE"
+            { check_required_tools; } >> "$LOG_FILE" 2>&1
+        fi
+        autodetect_devices
+        case "$COMMAND" in
+            profiles)     api_profiles ;;
+            chip)         api_chip ;;
+            switch)       api_switch "$COMMAND_ARG" ;;
+            disable)      api_disable "$COMMAND_ARG" ;;
+            reboot-modem) api_reboot ;;
+            notif-list)   api_notif_list ;;
+            notif-clear)  api_notif_clear ;;
+            notif-process) api_notif_process ;;
+            modem-status) api_modem_status ;;
+            lock-status)  api_lock_status ;;
+            download)     api_download ;;
+            delete)       api_delete "$COMMAND_ARG" ;;
+            nickname)     api_nickname "$COMMAND_ARG" ;;
+            syslog)       api_syslog "$COMMAND_ARG" ;;
+            runlog)       api_runlog ;;
+            version)      api_version ;;
+            at-cmd)       api_at_cmd "$COMMAND_ARG" ;;
+            soft-reset)   api_soft_reset ;;
+            usb-reset)    api_usb_reset ;;
+            uicc-reset)   api_uicc_reset ;;
+            *) api_err "unknown_command" "Unknown API command: '${COMMAND:-<empty>}'." ;;
+        esac
+        return 0
+    fi
+
+    # ── INTERACTIVE / CLI MODE ──────────────────────────────────────────────
+    say "${C_DIM}[....] Initializing LPAC eSIM Environment...${C_RST}"
+    check_required_tools
+    check_lpac_version
+    title
+
+    # Unset proxy vars — lpac/curl must connect directly to SM-DP+ servers
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+
+    # Backend selection (interactive only, not for CLI one-shot commands)
+    if [ -z "$COMMAND" ]; then
+        select_backend_interactive
+    fi
+
+    [ -n "$QMI_DEVICE" ] || select_qmi_device
+    if [ -z "$AT_DEVICE" ]; then select_at_port; fi
+
+    syslog_msg "[$BACKEND ${QMI_DEVICE:-${MBIM_DEVICE:-${AT_DEVICE:-?}}}] Session started"
+
+    case "$COMMAND" in
+        doctor)         check_required_tools; check_lpac_version ;;
+        status)         get_chip_info_json >/dev/null; get_profiles_json >/dev/null ;;
+        chip)           get_chip_info_json >/dev/null ;;
+        profiles)       pf="$(get_profiles_json)"; print_profiles_table "$pf" ;;
+        notif-clear)    notif_clear_queue ;;
+        notif-list)     out="${TMP_DIR}/notif-list.json"; run_lpac_json_to_file "notification list" "$out" 15; json_last_line "$out" ;;
+        reboot-modem)   reboot_modem_hard ;;
+        modem-status)   monitor_modem_status ;;
+        select-devices) select_qmi_device; select_at_port ;;
+        enable)         pf="$(get_profiles_json)"; rec="$(profile_resolve_record "$pf" "$COMMAND_ARG")"; old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"; try_profile_action_variants "enable" "enabled" "$2" "$3" ;;
+        disable)        pf="$(get_profiles_json)"; rec="$(profile_resolve_record "$pf" "$COMMAND_ARG")"; old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"; try_profile_action_variants "disable" "disabled" "$2" "$3" ;;
+        switch)         switch_profile "$COMMAND_ARG" ;;
+        delete)         pf="$(get_profiles_json)"; rec="$(profile_resolve_record "$pf" "$COMMAND_ARG")"; old_IFS="$IFS"; IFS='|'; set -- $rec; IFS="$old_IFS"; if [ "$4" = "enabled" ]; then die "Cannot delete active profile. Disable first."; fi; out="${TMP_DIR}/delete.json"; run_lpac_json_to_file "profile delete $(sq "$2")" "$out" 30 && ok "Profile deleted." || fail "Delete failed." ;;
+        nickname)       [ -z "$DL_NICKNAME" ] && die "Use: nickname <ICCID> --nickname <name>"; out="${TMP_DIR}/nick.json"; run_lpac_json_to_file "profile nickname $(sq "$COMMAND_ARG") $(sq "$DL_NICKNAME")" "$out" 15 && ok "Renamed." || fail "Rename failed." ;;
+        notif-process)  out="${TMP_DIR}/notif-proc.json"; run_lpac_json_to_file "notification process -a -r" "$out" 60 && ok "Notifications processed." || warn "Processing failed." ;;
+        "")             interactive_menu ;;
+        *)              die "unknown command: $COMMAND" ;;
+    esac
+}
+
+main "$@"

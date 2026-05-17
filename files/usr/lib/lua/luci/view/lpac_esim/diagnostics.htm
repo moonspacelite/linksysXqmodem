@@ -1,0 +1,68 @@
+<!-- /usr/lib/lua/luci/view/lpac_esim/diagnostics.htm — v3.0.0 -->
+
+<fieldset class="cbi-section">
+    <legend><%:System Log%></legend>
+    <div class="cbi-section-node">
+        <div id="diag-log" class="esim-terminal"><%:Loading log...%></div>
+        <div style="margin-top: 10px;">
+            <input type="button" class="cbi-button cbi-button-apply" value="<%:System Log%>" onclick="loadSyslog()" id="btn-syslog" title="Show filtered system log: modem, lpac, network events" />
+            <input type="button" class="cbi-button" value="<%:System Check%>" onclick="loadRunlog()" id="btn-runlog" title="Show backend initialization: tool paths, versions, detected USB/tty/cdc devices" />
+            <input type="button" class="cbi-button" value="<%:Copy Log%>" onclick="copyLog()" title="Copy current log content to clipboard" />
+        </div>
+    </div>
+</fieldset>
+
+<fieldset class="cbi-section">
+    <legend style="cursor: pointer;" onclick="toggleAtTerminal()"><%:AT Terminal%> <span id="at-toggle-arrow">&#9654;</span></legend>
+    <div class="cbi-section-node" id="at-terminal-section" style="display: none;">
+        <div id="at-terminal" class="esim-terminal" style="min-height: 200px; max-height: 400px; white-space: pre-wrap; font-family: monospace;"><%:Ready. Type an AT command or click Send to run ATI.%></div>
+        <div style="margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <input type="text" id="at-cmd-input" class="cbi-input-text" placeholder="ATI" value="ATI"
+                   style="flex: 1; min-width: 200px; font-family: monospace;"
+                   onkeydown="if(event.key==='Enter')sendAtCmd()"
+                   title="Type any AT command and press Enter or click Send" />
+            <input type="button" class="cbi-button cbi-button-apply" value="<%:Send%>" onclick="sendAtCmd()" title="Send the AT command to the modem serial port" />
+            <input type="button" class="cbi-button" value="<%:Clear%>" onclick="clearAtTerminal()" title="Clear AT terminal history" />
+        </div>
+        <div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap;">
+            <input type="button" class="cbi-button" value="ATI" onclick="sendAtPreset('ATI')" title="Modem identification: manufacturer, model, firmware version" />
+            <input type="button" class="cbi-button" value="AT+CSQ" onclick="sendAtPreset('AT+CSQ')" title="Signal quality: RSSI and BER values" />
+            <input type="button" class="cbi-button" value="AT+COPS?" onclick="sendAtPreset('AT+COPS?')" title="Current network operator and registration mode" />
+            <input type="button" class="cbi-button" value="AT+CFUN?" onclick="sendAtPreset('AT+CFUN?')" title="Phone functionality level: 0=minimum, 1=full, 4=airplane" />
+            <input type="button" class="cbi-button" value="AT^SWITCH_SLOT?" onclick="sendAtPreset('AT^SWITCH_SLOT?')" title="Current physical SIM slot: 0=external, 1=embedded eUICC" />
+            <input type="button" class="cbi-button" value="AT+CPIN?" onclick="sendAtPreset('AT+CPIN?')" title="SIM card status: READY, SIM PIN, SIM PUK, or not inserted" />
+        </div>
+    </div>
+</fieldset>
+
+<fieldset class="cbi-section">
+    <legend><%:Modem Reset Actions%></legend>
+    <div class="cbi-section-node">
+        <div class="esim-diag-actions">
+            <div class="esim-diag-card">
+                <strong><%:Soft Reset%></strong>
+                <p><%:Radio off/on cycle. Fastest recovery without USB re-enumeration. Uses the active transport protocol automatically.%></p>
+                <input type="button" class="cbi-button cbi-button-apply" value="<%:Soft Reset%>" onclick="diagAction('soft_reset', 'Soft Reset')" title="Radio off/on cycle via QMI DMS, MBIM radio, or AT+CFUN. No USB re-enumeration." />
+            </div>
+            <div class="esim-diag-card">
+                <strong><%:USB Port Re-init%></strong>
+                <p><%:Drop and re-enumerate the USB port via sysfs. Equivalent to physically unplugging and reinserting the modem.%></p>
+                <input type="button" class="cbi-button cbi-button-remove" value="<%:USB Reset%>" onclick="diagAction('usb_reset', 'USB Reset')" title="Sysfs authorized=0/1 cycle. Modem disappears for 10-15 seconds." />
+            </div>
+            <div class="esim-diag-card">
+                <strong><%:SIM Card Power Cycle%></strong>
+                <p><%:Power off and back on the SIM slot. Forces the modem to re-read the eUICC card without a full reboot.%></p>
+                <input type="button" class="cbi-button cbi-button-apply" value="<%:SIM Reset%>" onclick="diagAction('uicc_reset', 'SIM Reset')" title="QMI UIM power off/on or MBIM UICC reset. Re-reads eUICC without modem reboot." />
+            </div>
+            <div class="esim-diag-card">
+                <strong><%:Hard Reboot%></strong>
+                <p><%:Full modem OS reboot with automatic fallback cascade. Use when profile switch does not take effect.%></p>
+                <input type="button" class="cbi-button cbi-button-remove" value="<%:Hard Reboot%>" onclick="diagAction('reboot_modem', 'Hard Reboot')" title="Full modem OS restart. Tries active protocol → AT+CFUN=1,1 → USB sysfs reset." />
+            </div>
+        </div>
+    </div>
+</fieldset>
+
+<div id="diag-result" style="display: none; margin-top: 15px; padding: 10px; border-radius: 6px;"></div>
+
+<script type="text/javascript" src="<%=resource%>/lpac-esim/js/lpac-esim-diagnostics.js?v=3.0.0"></script>

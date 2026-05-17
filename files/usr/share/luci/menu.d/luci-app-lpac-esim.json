@@ -1,0 +1,124 @@
+{
+  "admin/modem": {
+    "title": "Modem",
+    "order": 55,
+    "action": {
+      "type": "firstchild",
+      "recurse": true
+    },
+    "depends": {
+      "acl": ["luci-app-lpac-esim"]
+    }
+  },
+  "admin/modem/lpac-esim": {
+    "title": "eSIM Manager",
+    "order": 60,
+    "action": {
+      "type": "template",
+      "path": "lpac_esim/main"
+    },
+    "depends": {
+      "acl": ["luci-app-lpac-esim"]
+    }
+  },
+  "admin/modem/lpac-esim/profiles": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_profiles" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/chip": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_chip" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/modem_status": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_modem_status" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/notif_list": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_notif_list" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/lock_status": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_lock_status" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/config": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_get_config" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/telegram_status": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_telegram_status" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/connectivity": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_connectivity" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/switch": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_switch" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/disable": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_disable" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/reboot_modem": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_reboot" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/notif_clear": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_notif_clear" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/save_config": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_save_config" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/save_telegram_config": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_save_telegram_config" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/download": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_download" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/delete": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_delete" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/nickname": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_nickname" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/notif_process": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_notif_process" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/syslog": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_syslog" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/runlog": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_runlog" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/version": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_version" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/at_cmd": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_at_cmd" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/soft_reset": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_soft_reset" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/usb_reset": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_usb_reset" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  },
+  "admin/modem/lpac-esim/uicc_reset": {
+    "action": { "type": "call", "module": "luci.controller.lpac_esim", "function": "api_uicc_reset" },
+    "depends": { "acl": ["luci-app-lpac-esim"] }
+  }
+}

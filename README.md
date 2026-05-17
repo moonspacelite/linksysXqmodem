@@ -5,6 +5,28 @@ Custom OpenWrt firmware builder for Linksys EA6350v3 with QModem from
 
 ## Cara build dari GitHub Actions
 
+### Opsi cepat: prebuild QModem dulu
+
+Untuk build firmware berikutnya lebih cepat, jalankan workflow **Build QModem
+Packages** dulu:
+
+1. Buka **Actions**.
+2. Pilih **Build QModem Packages**.
+3. Isi `openwrt_version`, `qmodem_ref`, dan `qmodem_ui`.
+4. Biarkan `commit_packages=true`.
+
+Workflow ini akan compile QModem sekali, upload artifact paket, lalu commit
+paketnya ke `packages/qmodem/<versi>/<ui>/`. Setelah itu workflow firmware
+bisa memakai paket prebuilt tersebut tanpa compile QModem ulang.
+
+Di workflow firmware, opsi `qmodem_package_mode` tersedia:
+
+- `prebuilt-or-build`: pakai prebuilt jika cocok, fallback compile jika belum ada.
+- `prebuilt-only`: wajib pakai prebuilt, gagal jika belum ada.
+- `build-from-source`: selalu compile QModem di run firmware itu.
+
+### Build firmware
+
 1. Buka tab **Actions** di repo GitHub ini.
 2. Pilih workflow **Build OpenWrt EA6350v3 QModem**.
 3. Klik **Run workflow**.
@@ -17,8 +39,11 @@ Custom OpenWrt firmware builder for Linksys EA6350v3 with QModem from
 Workflow otomatis:
 
 - download OpenWrt SDK dan ImageBuilder resmi untuk versi yang dipilih;
-- build paket QModem dari `https://github.com/FUjr/QModem.git` sebagai `.apk`;
+- memakai paket QModem prebuilt jika tersedia, atau build paket QModem dari
+  `https://github.com/FUjr/QModem.git` sebagai `.apk`;
 - patch QModem untuk deteksi dan kontrol T99W175 yang lebih cocok dengan modem ini;
+- memasukkan LPAC eSIM stack, LuCI eSIM Manager, CLI `esim`, Telegram eSIM bot,
+  HYFE helper dengan IMAP OTP, dan wrapper Ookla `speedtest`;
 - build image `ipq40xx/generic` profile `linksys_ea6350v3` dengan ImageBuilder;
 - upload `factory.bin`, `sysupgrade.bin`, `sha256sums`, `profiles.json`, dan `build-info.txt`.
 
@@ -60,6 +85,31 @@ Saat flash pertama, firmware mengaktifkan WiFi otomatis:
 - 5 GHz: `0x⁵`
 - Password: `1sampai10`
 - Country: `ID`
+
+## LPAC / eSIM default
+
+Firmware ini membawa paket prebuilt dari stack 0xygen-AIO:
+
+- `lpac`
+- `luci-app-lpac-manager`
+- `0xygen-aio`
+- rebuilt `curl`/`libcurl4` dengan IMAP/IMAPS/POP3/SMTP untuk auto OTP HYFE
+- CLI `esim`
+- Telegram bot eSIM management
+- wrapper `speedtest`
+
+Default LPAC disetel untuk T99W175 mode MBIM:
+
+- APDU backend: `mbim`
+- MBIM device: `/dev/cdc-wdm0`
+- MBIM proxy: enabled
+- MBIM skip slot mapping: enabled
+- AT port: `/dev/ttyUSB2`
+- modem interface untuk switch/reconnect: `1_1`
+- custom ISD-R AID: `A0000005591010FFFFFFFF8900000100`
+
+Default ini menjaga LPAC memakai `mbim-proxy` supaya akses eUICC tidak berebut
+port MBIM dengan koneksi modem yang sedang aktif.
 
 ## Catatan penting EA6350v3
 

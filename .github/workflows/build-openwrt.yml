@@ -21,6 +21,15 @@ on:
         options:
           - modern
           - legacy
+      qmodem_package_mode:
+        description: "Use committed QModem prebuilt packages when available, or compile them in this run"
+        required: true
+        default: "prebuilt-or-build"
+        type: choice
+        options:
+          - prebuilt-or-build
+          - prebuilt-only
+          - build-from-source
       create_release:
         description: "Also publish/update a GitHub Release"
         required: true
@@ -34,6 +43,8 @@ env:
   OPENWRT_TARGET_PATH: ipq40xx/generic
   OPENWRT_PROFILE: linksys_ea6350v3
   OPENWRT_ARCH_LABEL: arm_cortex-a7_neon-vfpv4
+  OOKLA_SPEEDTEST_URL: https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-armhf.tgz
+  OOKLA_SPEEDTEST_SHA256: e45fcdebbd8a185553535533dd032d6b10bc8c64eee4139b1147b9c09835d08d
 
 jobs:
   build:
@@ -89,6 +100,49 @@ jobs:
           echo "qmodem_ref=${qmodem_ref}" >> "$GITHUB_OUTPUT"
           echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve QModem package source
+        id: qmodem_packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mode="${{ inputs.qmodem_package_mode }}"
+          prebuilt_dir="packages/qmodem/${{ steps.inputs.outputs.version }}/${{ inputs.qmodem_ui }}"
+          use_prebuilt="false"
+
+          if [[ "$mode" != "build-from-source" && -d "$prebuilt_dir" ]]; then
+            shopt -s nullglob
+            pkg_files=("$prebuilt_dir"/*.apk "$prebuilt_dir"/*.ipk)
+            shopt -u nullglob
+
+            if [[ "${#pkg_files[@]}" -gt 0 ]]; then
+              if [[ -f "$prebuilt_dir/build-info.txt" ]] \
+                && grep -Fxq "OpenWrt version: ${{ steps.inputs.outputs.version }}" "$prebuilt_dir/build-info.txt" \
+                && grep -Fxq "QModem ref: ${{ steps.inputs.outputs.qmodem_ref }}" "$prebuilt_dir/build-info.txt" \
+                && grep -Fxq "QModem UI: ${{ inputs.qmodem_ui }}" "$prebuilt_dir/build-info.txt"; then
+                use_prebuilt="true"
+              else
+                echo "::warning::Found QModem prebuilt packages in ${prebuilt_dir}, but build-info.txt does not match this run."
+              fi
+            fi
+          fi
+
+          if [[ "$mode" == "prebuilt-only" && "$use_prebuilt" != "true" ]]; then
+            echo "::error::No matching QModem prebuilt packages found in ${prebuilt_dir}. Run the 'Build QModem Packages' workflow first, or choose prebuilt-or-build/build-from-source."
+            exit 1
+          fi
+
+          if [[ "$use_prebuilt" == "true" ]]; then
+            package_source="prebuilt"
+          else
+            package_source="built in firmware workflow"
+          fi
+
+          echo "use_prebuilt=${use_prebuilt}" >> "$GITHUB_OUTPUT"
+          echo "source=${package_source}" >> "$GITHUB_OUTPUT"
+          echo "prebuilt_dir=${prebuilt_dir}" >> "$GITHUB_OUTPUT"
+          echo "QModem package source: ${package_source} (${prebuilt_dir})"
+
       - name: Install build dependencies
         shell: bash
         run: |
@@ -114,7 +168,21 @@ jobs:
           tar --use-compress-program=unzstd -xf imagebuilder.tar.zst
           mv openwrt-imagebuilder-* imagebuilder
 
+      - name: Use prebuilt QModem packages
+        if: ${{ steps.qmodem_packages.outputs.use_prebuilt == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/qmodem-packages
+          shopt -s nullglob
+          cp -vf "${{ steps.qmodem_packages.outputs.prebuilt_dir }}"/*.apk build/qmodem-packages/ || true
+          cp -vf "${{ steps.qmodem_packages.outputs.prebuilt_dir }}"/*.ipk build/qmodem-packages/ || true
+          shopt -u nullglob
+          cp -vf "${{ steps.qmodem_packages.outputs.prebuilt_dir }}/build-info.txt" build/qmodem-packages/qmodem-build-info.txt
+          ls -lah build/qmodem-packages
+
       - name: Build QModem packages with SDK
+        if: ${{ steps.qmodem_packages.outputs.use_prebuilt != 'true' }}
         working-directory: build/sdk
         shell: bash
         run: |
@@ -220,9 +288,43 @@ jobs:
           mkdir -p packages files
           cp -vf ../qmodem-packages/* packages/
 
+          if compgen -G "$GITHUB_WORKSPACE/packages/prebuilt/*.apk" > /dev/null; then
+            cp -vf "$GITHUB_WORKSPACE"/packages/prebuilt/*.apk packages/
+          fi
+          if compgen -G "$GITHUB_WORKSPACE/packages/prebuilt/*.ipk" > /dev/null; then
+            cp -vf "$GITHUB_WORKSPACE"/packages/prebuilt/*.ipk packages/
+          fi
+
           if [[ -d ../../files ]]; then
             rsync -a ../../files/ files/
           fi
+
+          find files/etc/uci-defaults -type f -exec chmod 0755 {} \; 2>/dev/null || true
+          find files/etc/init.d -type f -exec chmod 0755 {} \; 2>/dev/null || true
+          find files/usr/bin -maxdepth 1 -type f -exec chmod 0755 {} \; 2>/dev/null || true
+
+          if [[ -f ../../src/esim-telegram-bot.c ]]; then
+            mkdir -p files/usr/bin
+            export STAGING_DIR="$GITHUB_WORKSPACE/build/sdk/staging_dir"
+            cc="$(find "$STAGING_DIR" -type f -name '*-openwrt-linux-*-gcc' | head -n1 || true)"
+            if [[ -z "$cc" ]]; then
+              echo "::error::OpenWrt SDK cross compiler was not found under $STAGING_DIR"
+              exit 1
+            fi
+            "$cc" -Wall -Wextra -Os -s -o files/usr/bin/esim-telegram-bot ../../src/esim-telegram-bot.c
+            chmod 0755 files/usr/bin/esim-telegram-bot
+            ls -lh files/usr/bin/esim-telegram-bot
+          fi
+
+          speedtest_tgz="$GITHUB_WORKSPACE/build/ookla-speedtest-armhf.tgz"
+          if [[ ! -f "$speedtest_tgz" ]]; then
+            curl -fL --retry 5 --retry-delay 2 -o "$speedtest_tgz" "$OOKLA_SPEEDTEST_URL"
+          fi
+          echo "$OOKLA_SPEEDTEST_SHA256  $speedtest_tgz" | sha256sum -c -
+          mkdir -p files/usr/libexec
+          tar -xzf "$speedtest_tgz" -C files/usr/libexec speedtest
+          mv -f files/usr/libexec/speedtest files/usr/libexec/ookla-speedtest
+          chmod 0755 files/usr/libexec/ookla-speedtest
 
           if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
             qmodem_packages="qmodem luci-app-qmodem-next sms-forwarder-next quectel-CM-5G-M"
@@ -230,7 +332,8 @@ jobs:
             qmodem_packages="qmodem luci-app-qmodem luci-app-qmodem-sms luci-app-qmodem-mwan luci-app-qmodem-ttlfw4 sms-forwarder quectel-CM-5G-M"
           fi
 
-          packages="luci ${qmodem_packages} kmod-usb-net-cdc-mbim kmod-usb-serial-option kmod-usb-serial-qualcomm usbutils picocom"
+          esim_packages="lpac luci-app-lpac-manager 0xygen-aio atinout luci-compat luci-lua-runtime libmbim mbim-utils libqmi uqmi jq coreutils-timeout libcurl4 curl ca-bundle ca-certificates"
+          packages="luci ${qmodem_packages} ${esim_packages} kmod-usb-net-cdc-mbim kmod-usb-serial-option kmod-usb-serial-qualcomm usbutils picocom"
 
           echo "Building ImageBuilder profile ${OPENWRT_PROFILE}"
           echo "Packages: ${packages}"
@@ -259,8 +362,11 @@ jobs:
             echo "OpenWrt version: ${{ steps.inputs.outputs.version }}"
             echo "QModem ref: ${{ steps.inputs.outputs.qmodem_ref }}"
             echo "QModem UI: ${{ inputs.qmodem_ui }}"
+            echo "QModem package source: ${{ steps.qmodem_packages.outputs.source }}"
             echo "Target: Linksys EA6350v3 / ${OPENWRT_TARGET_PATH} / ${OPENWRT_ARCH_LABEL}"
             echo "Builder: OpenWrt SDK + ImageBuilder"
+            echo "eSIM stack: lpac, luci-app-lpac-manager, 0xygen-aio, Telegram bot, HYFE IMAP helpers, Ookla speedtest"
+            echo "LPAC defaults: MBIM /dev/cdc-wdm0, mbim-proxy=1, mbim-skip-slot=1, AT /dev/ttyUSB2, modem_iface=1_1"
           } > firmware/build-info.txt
 
       - name: Upload firmware artifact
@@ -286,5 +392,5 @@ jobs:
           else
             gh release create "$TAG_NAME" firmware/* \
               --title "$RELEASE_NAME" \
-              --notes "Custom OpenWrt ${{ steps.inputs.outputs.version }} firmware for Linksys EA6350v3 with QModem (${{ steps.inputs.outputs.qmodem_ref }})."
+              --notes "Custom OpenWrt ${{ steps.inputs.outputs.version }} firmware for Linksys EA6350v3 with QModem (${{ steps.inputs.outputs.qmodem_ref }}) and LPAC eSIM tools."
           fi

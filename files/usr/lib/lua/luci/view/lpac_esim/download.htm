@@ -1,0 +1,82 @@
+<!-- /usr/lib/lua/luci/view/lpac_esim/download.htm -->
+
+<fieldset class="cbi-section">
+    <legend><%:QR Code Upload%></legend>
+    <div class="cbi-section-node">
+        <div class="cbi-value">
+            <label class="cbi-value-title"><%:QR Code Image%>:</label>
+            <div class="cbi-value-field">
+                <input type="file" id="qr-file" accept="image/*" onchange="handleQRFile(this)" class="cbi-input-file" />
+                <div class="cbi-value-description"><%:Upload a JPG or PNG image containing the eSIM QR code%></div>
+            </div>
+        </div>
+
+        <div id="qr-preview-container" style="display: none; margin-top: 15px;">
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Preview%>:</label>
+                <div class="cbi-value-field">
+                    <div style="display: inline-block; vertical-align: top;">
+                        <img id="qr-preview" style="max-width: 300px; max-height: 200px; border: 1px solid #ccc; border-radius: 4px; display: block;" />
+                        <div id="qr-decode-status" style="margin-top: 8px;">
+                            <div id="qr-decode-loading" style="display: none; color: #0099cc;"><%:Decoding QR code...%></div>
+                            <div id="qr-decode-success" style="display: none; color: green;"><strong><%:QR decoded!%></strong></div>
+                            <div id="qr-decode-error" style="display: none; color: red;"><span id="qr-decode-error-message"></span></div>
+                        </div>
+                        <button type="button" class="cbi-button cbi-button-reset" onclick="clearQRUpload()" style="margin-top: 10px;"><%:Clear%></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</fieldset>
+
+<fieldset class="cbi-section">
+    <legend><%:Activation Code (LPA string or manual)%></legend>
+    <div class="cbi-section-node">
+        <div class="cbi-value">
+            <label class="cbi-value-title"><%:LPA String%>:</label>
+            <div class="cbi-value-field">
+                <input type="text" id="lpa-activation-code" class="cbi-input-text" placeholder="LPA:1$smdp.example.com$MATCHING-ID" />
+                <div class="cbi-value-description"><%:Full LPA string (from QR or pasted). Takes precedence over manual fields below.%></div>
+            </div>
+        </div>
+        <div class="cbi-value">
+            <label class="cbi-value-title"><%:SM-DP+ Server%>:</label>
+            <div class="cbi-value-field">
+                <input type="text" id="smdp-server" class="cbi-input-text" placeholder="smdp.example.com" />
+            </div>
+        </div>
+        <div class="cbi-value">
+            <label class="cbi-value-title"><%:Matching ID%>:</label>
+            <div class="cbi-value-field">
+                <input type="text" id="matching-id" class="cbi-input-text" placeholder="QR-G-5C-1LS-XXXXX" />
+            </div>
+        </div>
+        <div class="cbi-value">
+            <label class="cbi-value-title"><%:Confirmation Code%>:</label>
+            <div class="cbi-value-field">
+                <input type="text" id="confirmation-code" class="cbi-input-text" placeholder="<%:Optional%>" />
+            </div>
+        </div>
+    </div>
+</fieldset>
+
+<div id="download-status" style="margin-top: 20px;">
+    <div id="download-loading" style="display: none; padding: 15px; border: 1px solid #17a2b8; background: #d1ecf1; border-radius: 4px; color: #0c5460;">
+        <strong><%:Downloading profile...%></strong> <%:This may take 1-2 minutes. Do not close this page.%>
+    </div>
+    <div id="download-success" style="display: none; color: green; padding: 10px; border: 1px solid #5cb85c; background: #dff0d8; border-radius: 4px;">
+        <strong><%:Success%>:</strong> <span id="download-success-message"></span>
+    </div>
+    <div id="download-error" style="display: none; color: #d9534f; padding: 10px; border: 1px solid #d9534f; background: #f2dede; border-radius: 4px;">
+        <strong><%:Error%>:</strong> <span id="download-error-message"></span>
+    </div>
+</div>
+
+<div class="cbi-page-custom-actions">
+    <input type="button" class="cbi-button cbi-button-apply" value="<%:Download Profile%>" onclick="downloadProfile()" />
+    <input type="button" class="cbi-button cbi-button-reset" value="<%:Clear%>" onclick="clearDownloadForm()" />
+</div>
+
+<script type="text/javascript" src="<%=resource%>/lpac-esim/js/jsQR.js?v=3.0.0"></script>
+<script type="text/javascript" src="<%=resource%>/lpac-esim/js/lpac-esim-download.js?v=3.0.0"></script>

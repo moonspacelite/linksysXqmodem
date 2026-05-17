@@ -1,0 +1,49 @@
+<!-- /usr/lib/lua/luci/view/lpac_esim/notifications.htm -->
+
+<div id="notifications-loading" style="text-align: center; padding: 20px;">
+    <%:Loading notifications...%>
+</div>
+
+<div id="notifications-content" style="display: none;">
+    <fieldset class="cbi-section">
+        <legend><%:Pending Notifications%></legend>
+        <div class="cbi-section-node">
+            <div class="table-responsive">
+                <table class="cbi-section-table" id="notifications-table">
+                    <thead>
+                        <tr class="cbi-section-table-titles">
+                            <th class="cbi-section-table-cell"><%:Sequence%></th>
+                            <th class="cbi-section-table-cell"><%:ICCID%></th>
+                            <th class="cbi-section-table-cell"><%:Operation%></th>
+                            <th class="cbi-section-table-cell"><%:Server%></th>
+                        </tr>
+                    </thead>
+                    <tbody id="notifications-tbody">
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="no-notifications" style="display: none; text-align: center; padding: 20px; color: #666;">
+                <%:No pending notifications%>
+            </div>
+        </div>
+    </fieldset>
+</div>
+
+<div id="notifications-error" style="display: none; color: red; padding: 10px;">
+    <strong><%:Error%>:</strong> <span id="notifications-error-message"></span>
+</div>
+
+<div id="notification-status" style="margin-top: 20px;">
+    <div id="notifications-success" style="display: none; color: green; padding: 10px; border: 1px solid #5cb85c; background: #dff0d8; border-radius: 4px;">
+        <strong><%:Status%>:</strong> <span id="notifications-success-message"></span>
+    </div>
+</div>
+
+<div class="cbi-page-custom-actions">
+    <input type="button" class="cbi-button cbi-button-apply" value="<%:Process & Remove All%>" onclick="processAllNotifications()" />
+    <input type="button" class="cbi-button cbi-button-remove" value="<%:Clear All (Offline)%>" onclick="clearNotifications()" />
+    <input type="button" class="cbi-button cbi-button-reset" value="<%:Refresh%>" onclick="loadNotifications()" />
+</div>
+
+<script type="text/javascript" src="<%=resource%>/lpac-esim/js/lpac-esim-notifications.js?v=3.0.0"></script>

@@ -1,0 +1,129 @@
+<!-- /usr/lib/lua/luci/view/lpac_esim/telegram.htm -->
+
+<div id="telegram-loading" style="text-align: center; padding: 20px;">
+    <%:Loading Telegram bot settings...%>
+</div>
+
+<div id="telegram-content" style="display: none;">
+    <!-- Live status badge populated by lpac-esim-telegram.js. Renders as
+         green "Running, replying to messages" or red "Stopped" / "API error" /
+         "Misconfigured" so the user can see at a glance whether the bot is
+         actually working, instead of relying on the Enable Bot toggle alone. -->
+    <fieldset class="cbi-section">
+        <legend><%:Bot Status%></legend>
+        <div class="cbi-section-node">
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Status%></label>
+                <div class="cbi-value-field">
+                    <span id="telegram-badge" style="display: inline-block; padding: 4px 10px; border-radius: 12px; font-weight: 600; color: #fff; background: #888;"><%:Checking…%></span>
+                    <span id="telegram-badge-detail" style="margin-left: 10px; color: #888;"></span>
+                </div>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset class="cbi-section">
+        <legend><%:Telegram Bot%></legend>
+        <div class="cbi-section-node">
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Enable Bot%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-telegram-enabled" class="cbi-input-select">
+                        <option value="0"><%:Disabled%></option>
+                        <option value="1"><%:Enabled%></option>
+                    </select>
+                    <div class="cbi-value-description"><%:Runs the small C Telegram bridge using long polling. Disable when not needed to save RAM and traffic.%></div>
+                </div>
+            </div>
+
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Bot Token%></label>
+                <div class="cbi-value-field">
+                    <input type="password" id="cfg-telegram-bot-token" class="cbi-input-text" autocomplete="off" placeholder="123456789:AA..." />
+                    <div class="cbi-value-description"><%:Token from @BotFather. After saving, open your own bot chat (not BotFather) and send /start.%></div>
+                </div>
+            </div>
+
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Allowed Chat ID%></label>
+                <div class="cbi-value-field">
+                    <input type="text" id="cfg-telegram-allowed-chat-id" class="cbi-input-text" placeholder="123456789" />
+                    <div class="cbi-value-description"><%:Only this Telegram chat can control eSIM. Leave empty only to run /chatid in your own bot chat first, then fill it here.%></div>
+                </div>
+            </div>
+
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Poll Interval%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-telegram-poll-interval" class="cbi-input-select">
+                        <option value="1">1s</option>
+                        <option value="2">2s</option>
+                        <option value="5">5s</option>
+                        <option value="10">10s</option>
+                        <option value="30">30s</option>
+                    </select>
+                    <div class="cbi-value-description"><%:Delay after each long-poll request. 2 seconds is a good balance between response time and CPU/network usage.%></div>
+                </div>
+            </div>
+
+            <div class="cbi-value">
+                <label class="cbi-value-title"><%:Debug Logging%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-telegram-debug" class="cbi-input-select">
+                        <option value="0"><%:Disabled%></option>
+                        <option value="1"><%:Enabled%></option>
+                    </select>
+                    <div class="cbi-value-description"><%:Writes extra bot diagnostics to syslog. Keep disabled for normal use.%></div>
+                </div>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset class="cbi-section">
+        <legend><%:Supported Commands%></legend>
+        <div class="cbi-section-node">
+            <pre class="esim-terminal" style="white-space: pre-wrap;">Open your own bot username from @BotFather, not the BotFather chat itself.
+
+/start or /menu
+/chatid
+/profiles
+/profile
+/iccid
+/info
+/eid
+/status
+/switch &lt;ICCID|AID&gt;
+/disable &lt;ICCID|AID&gt;
+/delete &lt;ICCID|AID&gt;
+/download &lt;LPA:1$...&gt;
+/quota &lt;MSISDN&gt;
+/set_config &lt;option&gt; &lt;value&gt;
+/notifications
+/process_notifications
+/lock</pre>
+        </div>
+    </fieldset>
+
+    <div class="cbi-page-custom-actions">
+        <input type="button" class="cbi-button cbi-button-apply" value="<%:Save & Restart Bot%>" onclick="saveTelegramConfig()" />
+        <input type="button" class="cbi-button cbi-button-action" value="<%:Check Bot Status%>" onclick="checkTelegramStatus(true)" />
+        <input type="button" class="cbi-button cbi-button-reset" value="<%:Reload%>" onclick="loadTelegramConfig()" />
+    </div>
+
+    <fieldset class="cbi-section">
+        <legend><%:Bot Diagnostics%></legend>
+        <div class="cbi-section-node">
+            <pre id="telegram-status" class="esim-terminal" style="white-space: pre-wrap;">Click "Check Bot Status" after saving.</pre>
+        </div>
+    </fieldset>
+</div>
+
+<div id="telegram-error" style="display: none; color: red; padding: 10px;">
+    <strong><%:Error%>:</strong> <span id="telegram-error-message"></span>
+</div>
+
+<div id="telegram-success" style="display: none; color: green; padding: 10px;">
+    <strong><%:Success%>:</strong> <span id="telegram-success-message"></span>
+</div>
+
+<script type="text/javascript" src="<%=resource%>/lpac-esim/js/lpac-esim-telegram.js?v=3.2.0"></script>

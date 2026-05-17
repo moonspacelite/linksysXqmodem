@@ -1,0 +1,77 @@
+<%+header%>
+
+<div class="lpac-app">
+<!-- eSIM Connectivity Banner -->
+<div id="esim-connectivity-banner" style="margin-bottom: 20px;">
+    <div id="connectivity-checking" style="display: block; padding: 10px; border: 1px solid #ffc107; background: #fff3cd; border-radius: 4px; color: #856404;">
+        <strong><%:Checking internet connection...%></strong>
+    </div>
+
+    <div id="connectivity-online" style="display: none; padding: 10px; border: 1px solid #28a745; background: #d4edda; border-radius: 4px; color: #155724;">
+        <strong><%:Internet connection available%></strong> — <%:You can manage eSIM profiles%>
+    </div>
+
+    <div id="connectivity-offline" style="display: none; padding: 10px; border: 1px solid #dc3545; background: #f8d7da; border-radius: 4px; color: #721c24;">
+        <strong><%:No internet connection detected%></strong> — <%:An internet connection is required to download eSIM profiles. Local management (switch, reboot) works offline.%>
+        <br><br>
+        <button type="button" class="cbi-button cbi-button-apply" onclick="checkConnectivity()"><%:Check Again%></button>
+    </div>
+</div>
+
+<!-- Lock/Busy Banner (shown during async operations) -->
+<div id="esim-lock-banner" style="display: none; margin-bottom: 20px; padding: 10px; border: 1px solid #17a2b8; background: #d1ecf1; border-radius: 4px; color: #0c5460;">
+    <strong><%:Backend is busy%></strong> — <span id="esim-lock-text"><%:An operation is in progress, please wait...%></span>
+</div>
+
+<div class="cbi-map">
+    <h2 name="content"><%:eSIM Profile Manager%> <span id="esim-app-version" style="font-size: 0.55em; font-weight: normal; opacity: 0.5;"></span></h2>
+    <div class="cbi-map-descr"><%:Manage eSIM profiles on OpenWrt via lpac-esim backend%></div>
+
+    <div class="cbi-tabmenu">
+        <ul>
+            <li class="cbi-tab"><a href="#" onclick="return showTab('info-tab', this)"><%:eSIM Info%></a></li>
+            <li class="cbi-tab"><a href="#" onclick="return showTab('profiles-tab', this)"><%:Profiles%></a></li>
+            <li class="cbi-tab"><a href="#" onclick="return showTab('download-tab', this)"><%:Download Profile%></a></li>
+            <li class="cbi-tab"><a href="#" onclick="return showTab('notifications-tab', this)"><%:Notifications%></a></li>
+            <li class="cbi-tab"><a href="#" onclick="return showTab('config-tab', this)"><%:Configuration%></a></li>
+            <li class="cbi-tab"><a href="#" onclick="return showTab('telegram-tab', this)"><%:Telegram Bot%></a></li>
+            <li class="cbi-tab"><a href="#" onclick="return showTab('diag-tab', this)"><%:Diagnostics%></a></li>
+        </ul>
+    </div>
+
+    <div class="cbi-tabcontainer">
+        <div id="info-tab" class="cbi-tabcontent cbi-tabcontent-active">
+            <%+lpac_esim/info%>
+        </div>
+
+        <div id="profiles-tab" class="cbi-tabcontent">
+            <%+lpac_esim/profiles%>
+        </div>
+
+        <div id="download-tab" class="cbi-tabcontent">
+            <%+lpac_esim/download%>
+        </div>
+
+        <div id="notifications-tab" class="cbi-tabcontent">
+            <%+lpac_esim/notifications%>
+        </div>
+
+        <div id="config-tab" class="cbi-tabcontent">
+            <%+lpac_esim/config%>
+        </div>
+
+        <div id="telegram-tab" class="cbi-tabcontent">
+            <%+lpac_esim/telegram%>
+        </div>
+
+        <div id="diag-tab" class="cbi-tabcontent">
+            <%+lpac_esim/diagnostics%>
+        </div>
+    </div>
+</div>
+</div>
+
+<link rel="stylesheet" type="text/css" href="<%=resource%>/lpac-esim/css/lpac-esim.css?v=3.1.1" />
+<script type="text/javascript" src="<%=resource%>/lpac-esim/js/lpac-esim-main.js?v=3.0.0"></script>
+
+<%+footer%>

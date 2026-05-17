@@ -1,0 +1,1980 @@
+#!/bin/sh
+
+LPAC_BIN="${LPAC_BIN:-/usr/bin/lpac}"
+SWITCH_REFRESH_FLAG="${SWITCH_REFRESH_FLAG:-1}"
+DEBUG=0
+
+if command -v uci >/dev/null 2>&1; then
+        _uci_iface="$(uci -q get lpac-esim.main.modem_iface 2>/dev/null)"
+        [ -n "$_uci_iface" ] && NETIFD_IFACE="$_uci_iface"
+fi
+NETIFD_IFACE="${NETIFD_IFACE:-modem}"
+LOCK_FILE="/tmp/lpac-esim/lpac.lock"
+UCI_CONFIG="lpac-esim"
+UCI_SECTION="main"
+
+case "${1:-}" in
+        --debug)
+                DEBUG=1
+                shift
+                ;;
+        --help|-h)
+                echo "Usage: esim [--debug]"
+                exit 0
+                ;;
+        --version)
+                echo "esim 0.3.0-aio"
+                exit 0
+                ;;
+esac
+
+# ─── HYFE library loader ─────────────────────────────────────────────────────
+# Dipasang sebelum kode UI/menu supaya helper-helper UI esim (warna, box_*,
+# kv_row, dst) didefinisikan dulu di scope yang sama, baru lib/hyfe.sh
+# (claim flow + wizard) di-source di paling akhir setelah UI siap pakai.
+# Kalau lib gak ada (mis. file rusak), esim tetap jalan tanpa menu HYFE.
+HYFE_LIB_DIR="${HYFE_LIB_DIR:-/usr/lib/hyfetrial}"
+if [ ! -f "$HYFE_LIB_DIR/common.sh" ]; then
+        unset CDPATH
+        _here=$(cd -- "$(dirname -- "$0")" && pwd)
+        for _candidate in \
+                "$_here/lib" \
+                "$_here/../lib/hyfetrial" \
+                "$_here/../usr/lib/hyfetrial" \
+                "$_here/../share/hyfetrial/lib"
+        do
+                if [ -f "$_candidate/common.sh" ]; then
+                        HYFE_LIB_DIR=$(cd -- "$_candidate" && pwd)
+                        break
+                fi
+        done
+fi
+
+if [ "$DEBUG" -eq 1 ]; then
+        LPAC_APDU_DEBUG=1
+        export LPAC_APDU_DEBUG
+fi
+
+if [ -t 1 ]; then
+        RED='\033[31m'
+        GREEN='\033[32m'
+        BLUE='\033[34m'
+        CYAN='\033[36m'
+        YELLOW='\033[33m'
+        MAGENTA='\033[35m'
+        BOLD='\033[1m'
+        RESET='\033[0m'
+        # Extended palette
+        BRED='\033[91m'
+        BGREEN='\033[92m'
+        BYELLOW='\033[93m'
+        BBLUE='\033[94m'
+        BMAGENTA='\033[95m'
+        BCYAN='\033[96m'
+        WHITE='\033[97m'
+        DIM='\033[2m'
+        ITALIC='\033[3m'
+        UNDERLINE='\033[4m'
+        # Background
+        BG_BLUE='\033[44m'
+        BG_CYAN='\033[46m'
+        BG_MAGENTA='\033[45m'
+        BG_RED='\033[41m'
+        BG_GREEN='\033[42m'
+        BG_YELLOW='\033[43m'
+        BG_BLACK='\033[40m'
+        BG_WHITE='\033[47m'
+        # XL Prepaid (banner main esim) — gradient blue: terang → tengah → gelap
+        XL_BLUE_LIGHT='\033[38;5;75m'
+        XL_BLUE_MID='\033[38;5;39m'
+        XL_BLUE_DARK='\033[38;5;33m'
+        # XL Prioritas (banner submenu HYFE) — gold + bg hitam
+        XL_GOLD='\033[38;5;220m'
+        XL_GOLD_DARK='\033[38;5;178m'
+        XL_GOLD_LIGHT='\033[38;5;226m'
+        # Section accents (HYFE submenu sections)
+        SEC_PURPLE='\033[38;5;141m'
+        SEC_LAVENDER='\033[38;5;183m'
+        SEC_TEAL='\033[38;5;51m'
+        SEC_LIME='\033[38;5;154m'
+        SEC_PINK='\033[38;5;213m'
+        SEC_ORANGE='\033[38;5;208m'
+        SEC_SKY='\033[38;5;117m'
+else
+        RED=''; GREEN=''; BLUE=''; CYAN=''; YELLOW=''; MAGENTA=''
+        BOLD=''; RESET=''; BRED=''; BGREEN=''; BYELLOW=''; BBLUE=''
+        BMAGENTA=''; BCYAN=''; WHITE=''; DIM=''; ITALIC=''; UNDERLINE=''
+        BG_BLUE=''; BG_CYAN=''; BG_MAGENTA=''; BG_RED=''; BG_GREEN=''
+        BG_YELLOW=''; BG_BLACK=''; BG_WHITE=''
+        XL_BLUE_LIGHT=''; XL_BLUE_MID=''; XL_BLUE_DARK=''
+        XL_GOLD=''; XL_GOLD_DARK=''; XL_GOLD_LIGHT=''
+        SEC_PURPLE=''; SEC_LAVENDER=''; SEC_TEAL=''; SEC_LIME=''
+        SEC_PINK=''; SEC_ORANGE=''; SEC_SKY=''
+fi
+
+BOX_WIDTH=65
+PROFILE_LINE='+----+------------+----------------------------------+----------+'
+DEBUG_PROFILE_LINE='+----+----------+------------------------+------------+------------------+'
+
+has_jq() { command -v jq >/dev/null 2>&1; }
+
+check_luci_lock() {
+        if [ -f "$LOCK_FILE" ]; then
+                _pid="$(cat "$LOCK_FILE" 2>/dev/null)"
+                if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+                        printf '%b  ⚠  LuCI/backend sedang menjalankan operasi (PID: %s).%b\n' "$BRED$BOLD" "$_pid" "$RESET" >&2
+                        printf '%b  Tunggu hingga selesai agar state eUICC tidak konflik.%b\n' "$DIM" "$RESET" >&2
+                        return 1
+                fi
+                rm -f "$LOCK_FILE" 2>/dev/null
+        fi
+        return 0
+}
+
+pause() {
+        printf '\n%b  Tekan Enter untuk lanjut... %b' "$DIM$ITALIC" "$RESET"
+        read -r _
+}
+
+run_lpac() { "$LPAC_BIN" "$@"; }
+
+repeat_char() {
+        char="$1"; count="$2"; out=''
+        while [ "$count" -gt 0 ]; do
+                out="$out$char"
+                count=$((count - 1))
+        done
+        printf '%s' "$out"
+}
+
+clean_text() {
+        printf '%s' "$1" | tr '\t\r\n' '   ' | tr -cd ' -~'
+}
+
+text_width() {
+        printf '%s' "$(clean_text "$1")" | wc -c | tr -d ' '
+}
+
+trim_text() {
+        text="$(clean_text "$1")"; max="$2"; len=${#text}
+        if [ "$len" -le "$max" ]; then
+                printf '%s' "$text"
+        else
+                cut_len=$((max - 3))
+                [ "$cut_len" -lt 1 ] && cut_len=1
+                printf '%s...' "$(printf '%s' "$text" | cut -c 1-$cut_len)"
+        fi
+}
+
+pad_right() {
+        text="$(trim_text "$1" "$2")"; width="$2"
+        len="$(text_width "$text")"
+        printf '%s%s' "$text" "$(repeat_char ' ' $((width - len)))"
+}
+
+# ─── Box drawing helpers ──────────────────────────────────────────────────────
+
+box_line() {
+        printf '%b+%s+%b\n' "$BCYAN" "$(repeat_char '─' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+box_line_thin() {
+        printf '%b├%s┤%b\n' "$CYAN" "$(repeat_char '─' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+box_top() {
+        printf '%b╔%s╗%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+box_bottom() {
+        printf '%b╚%s╝%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+box_sep() {
+        printf '%b╠%s╣%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+box_text() {
+        text="$1"; color="$2"
+        text="$(trim_text "$text" $((BOX_WIDTH - 4)))"
+        len=${#text}
+        left=$(((BOX_WIDTH - 2 - len) / 2))
+        right=$((BOX_WIDTH - 2 - len - left))
+        printf '%b║%*s%b%s%b%*s%b║%b\n' \
+                "$BCYAN" "$left" '' "$color" "$text" "$BCYAN" "$right" '' "$BCYAN" "$RESET"
+}
+
+box_center() {
+        text="$1"; color="$2"; border="${3:-$BCYAN}"
+        text="$(trim_text "$text" $((BOX_WIDTH - 2)))"
+        len=${#text}
+        inner=$((BOX_WIDTH - 2))
+        left=$(((inner - len) / 2))
+        right=$((inner - len - left))
+        printf '%b║%b%*s%b%s%b%*s%b║%b\n' \
+                "$border" "$RESET" "$left" '' "$color" "$text" "$RESET" "$right" '' "$border" "$RESET"
+}
+
+box_item() {
+        num="$1"; label="$2"; ncolor="$3"; lcolor="$4"; border="${5:-$BCYAN}"
+        label="$(trim_text "$label" 56)"
+        printf '%b║%b  %b%s%b  %b%-56s%b  %b║%b\n' \
+                "$border" "$RESET" "$ncolor" "$num" "$RESET" \
+                "$lcolor" "$label" "$RESET" "$border" "$RESET"
+}
+
+box_menu_item() {
+        num="$1"; label="$2"; color="$3"
+        printf '%b║%b  %b%s%b %b%-56s %b║%b\n' \
+                "$BCYAN" "$RESET" \
+                "$BOLD$BYELLOW" "$num" "$RESET" \
+                "${color:-$WHITE}" "$(trim_text "$label" 56)" \
+                "$BCYAN" "$RESET"
+}
+
+box_menu_sep() {
+        printf '%b║%b%s%b║%b\n' "$BCYAN" "$DIM" "$(repeat_char '.' $((BOX_WIDTH - 2)))" "$BCYAN" "$RESET"
+}
+
+# ─── L-mixed box (double top + rounded bottom) ────────────────────────────────
+# Border style L dari banner demo: ╔══╗ atas, ║║ samping, ╰──╯ bawah rounded.
+# Pakai untuk section box di submenu HYFE dengan accent color berbeda.
+# Argumen pertama (color) dapat dioverride; default BCYAN sesuai esim asli.
+
+lbox_top() {
+        color="${1:-$BCYAN}"
+        printf '%b╔%s╗%b\n' "$color" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+lbox_bottom() {
+        color="${1:-$BCYAN}"
+        printf '%b╰%s╯%b\n' "$color" "$(repeat_char '─' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+lbox_sep() {
+        color="${1:-$BCYAN}"
+        printf '%b╠%s╣%b\n' "$color" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+lbox_text() {
+        text="$1"; color="$2"; border="${3:-$BCYAN}"
+        text="$(trim_text "$text" $((BOX_WIDTH - 4)))"
+        len=${#text}
+        inner=$((BOX_WIDTH - 2))
+        left=$(((inner - len) / 2))
+        right=$((inner - len - left))
+        printf '%b║%b%*s%b%s%b%*s%b║%b\n' \
+                "$border" "$RESET" "$left" '' "$color" "$text" "$RESET" \
+                "$right" '' "$border" "$RESET"
+}
+
+lbox_kv() {
+        key="$1"; val="$2"
+        kc="${3:-$CYAN}"; vc="${4:-$WHITE}"; border="${5:-$BCYAN}"
+        val="$(pad_right "$val" 36)"
+        key="$(pad_right "$key" 22)"
+        printf '%b║%b %b%s%b %b│%b %b%s%b %b║%b\n' \
+                "$border" "$RESET" \
+                "$kc$BOLD" "$key" "$RESET" \
+                "$border" "$RESET" "$vc" "$val" "$RESET" \
+                "$border" "$RESET"
+}
+
+# Padded text row for L-box (left-aligned).
+lbox_item() {
+        text="$1"; color="${2:-$WHITE}"; border="${3:-$BCYAN}"
+        text="$(trim_text "$text" $((BOX_WIDTH - 4)))"
+        printf '%b║%b %b%-61s%b %b║%b\n' \
+                "$border" "$RESET" "$color" "$text" "$RESET" "$border" "$RESET"
+}
+
+# Empty padded line for spacing inside an L-box.
+lbox_blank() {
+        border="${1:-$BCYAN}"
+        printf '%b║%*s║%b\n' "$border" $((BOX_WIDTH - 2)) '' "$RESET"
+}
+
+# ─── 2-column MSISDN box (proper symmetric junctions) ─────────────────────────
+# Layout: ║ idx  msisdn   ║ idx  msisdn   ║   total = 65 chars
+# Inner = 63. Center divider = 1 char. Each cell = (63-1)/2 = 31 chars.
+
+mbox_top() {
+        color="${1:-$BCYAN}"
+        _w=31
+        printf '%b╔%s╦%s╗%b\n' "$color" \
+                "$(repeat_char '═' "$_w")" "$(repeat_char '═' "$_w")" "$RESET"
+}
+
+mbox_sep() {
+        color="${1:-$BCYAN}"
+        _w=31
+        printf '%b╠%s╬%s╣%b\n' "$color" \
+                "$(repeat_char '═' "$_w")" "$(repeat_char '═' "$_w")" "$RESET"
+}
+
+mbox_bottom() {
+        color="${1:-$BCYAN}"
+        _w=31
+        printf '%b╚%s╩%s╝%b\n' "$color" \
+                "$(repeat_char '═' "$_w")" "$(repeat_char '═' "$_w")" "$RESET"
+}
+
+# Render one row with up to 2 cells. Each cell: idx (right-aligned 2 char)
+# + 2sp + msisdn padded to 25 chars. Pass empty strings for missing right
+# cell on odd-length lists.
+mbox_row() {
+        l_idx="$1"; l_val="$2"; r_idx="$3"; r_val="$4"
+        color="${5:-$BCYAN}"; idx_c="${6:-$BOLD$BYELLOW}"; val_c="${7:-$BGREEN}"
+        # Right-align idx to width 2 so "1" → " 1" and "10" → "10" align.
+        l_idx_p=$(printf '%2s' "$l_idx")
+        r_idx_p=$(printf '%2s' "$r_idx")
+        l_val_p="$(pad_right "$l_val" 25)"
+        r_val_p="$(pad_right "$r_val" 25)"
+        printf '%b║%b %b%s%b  %b%s%b %b║%b %b%s%b  %b%s%b %b║%b\n' \
+                "$color" "$RESET" "$idx_c" "$l_idx_p" "$RESET" \
+                "$val_c" "$l_val_p" "$RESET" \
+                "$color" "$RESET" "$idx_c" "$r_idx_p" "$RESET" \
+                "$val_c" "$r_val_p" "$RESET" \
+                "$color" "$RESET"
+}
+
+# Title row spanning both cells (no center divider through the text).
+mbox_title() {
+        text="$1"; color="${2:-$BOLD$WHITE}"; border="${3:-$BCYAN}"
+        # Inner = 63 (no center divider for title; treat as one wide cell).
+        text="$(trim_text "$text" $((BOX_WIDTH - 4)))"
+        len=${#text}
+        inner=$((BOX_WIDTH - 2))
+        left=$(((inner - len) / 2))
+        right=$((inner - len - left))
+        printf '%b║%b%*s%b%s%b%*s%b║%b\n' \
+                "$border" "$RESET" "$left" '' "$color" "$text" "$RESET" \
+                "$right" '' "$border" "$RESET"
+}
+
+# Title-row separator that joins to top via ╦ (replace ═══╦═══ with full bar
+# ending in ╦). Used between mbox_top and the row that splits into 2 cells.
+mbox_title_sep() {
+        color="${1:-$BCYAN}"
+        _w=31
+        # Single bar with ╦ in the middle to start the 2-col split.
+        printf '%b╠%s╦%s╣%b\n' "$color" \
+                "$(repeat_char '═' "$_w")" "$(repeat_char '═' "$_w")" "$RESET"
+}
+
+# Top row that has no split (single horizontal across).
+mbox_full_top() {
+        color="${1:-$BCYAN}"
+        printf '%b╔%s╗%b\n' "$color" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+}
+
+# ─── XL Banner art (ESIM main + HYFE submenu) ─────────────────────────────────
+# ESIM banner: 6-row mini-block ASCII "ESIM" with gradient blue (XL Prepaid).
+# Top 2 rows = light blue, mid 2 = mid blue, bottom 2 = dark blue.
+esim_main_banner() {
+        printf '\n'
+        printf '%b  ███████╗███████╗██╗███╗   ███╗%b\n' "$BOLD$XL_BLUE_LIGHT" "$RESET"
+        printf '%b  ██╔════╝██╔════╝██║████╗ ████║%b\n' "$BOLD$XL_BLUE_LIGHT" "$RESET"
+        printf '%b  █████╗  ███████╗██║██╔████╔██║%b\n' "$BOLD$XL_BLUE_MID" "$RESET"
+        printf '%b  ██╔══╝  ╚════██║██║██║╚██╔╝██║%b\n' "$BOLD$XL_BLUE_MID" "$RESET"
+        printf '%b  ███████╗███████║██║██║ ╚═╝ ██║%b\n' "$BOLD$XL_BLUE_DARK" "$RESET"
+        printf '%b  ╚══════╝╚══════╝╚═╝╚═╝     ╚═╝%b\n' "$BOLD$XL_BLUE_DARK" "$RESET"
+        printf '%b   0xygen-AIO Manager CLI  •  v0.3.0%b\n' "$BOLD$WHITE" "$RESET"
+        printf '%b   lpac  ·  openwrt  ·  esim  trial  hyfe%b\n\n' "$DIM$ITALIC$WHITE" "$RESET"
+}
+
+# HYFE banner: 6-row mini-block ASCII "HYFE" with solid gold + bg hitam
+# (XL Prioritas).
+hyfe_main_banner() {
+        printf '\n'
+        _g="$BOLD$XL_GOLD$BG_BLACK"
+        printf '%b  ██╗  ██╗██╗   ██╗███████╗███████╗  %b\n' "$_g" "$RESET"
+        printf '%b  ██║  ██║╚██╗ ██╔╝██╔════╝██╔════╝  %b\n' "$_g" "$RESET"
+        printf '%b  ███████║ ╚████╔╝ █████╗  █████╗    %b\n' "$_g" "$RESET"
+        printf '%b  ██╔══██║  ╚██╔╝  ██╔══╝  ██╔══╝    %b\n' "$_g" "$RESET"
+        printf '%b  ██║  ██║   ██║   ██║     ███████╗  %b\n' "$_g" "$RESET"
+        printf '%b  ╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚══════╝  %b\n' "$_g" "$RESET"
+        printf '%b   Klaim eSIM Trial XL Prioritas%b\n\n' "$BOLD$WHITE" "$RESET"
+}
+
+# ─── Table drawing helpers ────────────────────────────────────────────────────
+
+table_line() {
+        color="$1"; left="$2"; mid="$3"; right="$4"; shift 4
+        out="$left"
+        first=1
+        for width in "$@"; do
+                [ "$first" -eq 1 ] || out="$out$mid"
+                out="$out$(repeat_char '═' "$width")"
+                first=0
+        done
+        out="$out$right"
+        printf '%b%s%b\n' "$color" "$out" "$RESET"
+}
+
+table_row4() {
+        color="$1"; c1="$2"; c2="$3"; c3="$4"; c4="$5"; s4="${6:-}"
+        c1="$(pad_right "$c1" 2)"
+        c2="$(pad_right "$c2" 10)"
+        c3="$(pad_right "$c3" 32)"
+        c4="$(pad_right "$c4" 8)"
+        printf '%b║%b %b%s%b %b║%b %b%s%b %b║%b %b%s%b %b║%b %b%s%b %b║%b\n' \
+                "$color" "$RESET" "$BOLD$BYELLOW" "$c1" "$RESET" "$color" \
+                "$RESET" "$s4" "$c2" "$RESET" "$color" \
+                "$RESET" "$s4" "$c3" "$RESET" "$color" \
+                "$RESET" "$s4" "$c4" "$RESET" "$color" "$RESET"
+}
+
+table_row5() {
+        color="$1"; c1="$2"; c2="$3"; c3="$4"; c4="$5"; c5="$6"; row_color="${7:-}"
+        c1="$(pad_right "$c1" 2)"
+        c2="$(pad_right "$c2" 7)"
+        c3="$(pad_right "$c3" 20)"
+        c4="$(pad_right "$c4" 8)"
+        c5="$(pad_right "$c5" 12)"
+        printf '%b║%b %b%s%b %b║%b %b%s%b %b║%b %b%s%b %b║%b %b%s%b %b║%b %b%s%b %b║%b\n' \
+                "$color" "$RESET" "$BOLD$BYELLOW" "$c1" "$RESET" "$color" \
+                "$RESET" "$row_color" "$c2" "$RESET" "$color" \
+                "$RESET" "$row_color" "$c3" "$RESET" "$color" \
+                "$RESET" "$row_color" "$c4" "$RESET" "$color" \
+                "$RESET" "$row_color" "$c5" "$RESET" "$color" "$RESET"
+}
+
+# ─── Profile table helpers ────────────────────────────────────────────────────
+
+draw_line() {
+        printf '%b%s%b\n' "$CYAN" "$PROFILE_LINE" "$RESET"
+}
+
+draw_debug_line() {
+        printf '%b%s%b\n' "$CYAN" "$DEBUG_PROFILE_LINE" "$RESET"
+}
+
+# ─── Section header ───────────────────────────────────────────────────────────
+
+section_header() {
+        title="$1"; color="${2:-$BCYAN}"
+        len=${#title}
+        pad=$(( (BOX_WIDTH - len - 4) / 2 ))
+        printf '\n%b%s %b%b %s %b%b%s%b\n' \
+                "$color" "$(repeat_char '─' $pad)" \
+                "$BOLD$WHITE" "$BG_BLACK" " $title " \
+                "$RESET" "$color" "$(repeat_char '─' $pad)" "$RESET"
+}
+
+# ─── Key-value row ────────────────────────────────────────────────────────────
+
+kv_row() {
+        key="$1"; val="$2"; kcolor="${3:-$CYAN}"; vcolor="${4:-$WHITE}"
+        printf '  %b%-22s%b %b%s%b\n' "$kcolor$BOLD" "$key" "$RESET" "$vcolor" "$val" "$RESET"
+}
+
+json_get() {
+        printf '%s\n' "$1" | jq -r "$2 // empty" 2>/dev/null | head -n 1
+}
+
+http_get() {
+        url="$1"; shift
+        if command -v curl >/dev/null 2>&1; then
+                curl -fsSL --connect-timeout 10 --max-time 30 "$@" "$url"
+                return
+        fi
+
+        if command -v wget >/dev/null 2>&1; then
+                h1=''; h2=''; h3=''
+                while [ "$#" -gt 0 ]; do
+                        case "$1" in
+                                -H)
+                                        shift
+                                        if [ -z "$h1" ]; then h1="$1"
+                                        elif [ -z "$h2" ]; then h2="$1"
+                                        else h3="$1"
+                                        fi
+                                        ;;
+                        esac
+                        shift
+                done
+                if [ -n "$h3" ]; then
+                        wget -qO- --header="$h1" --header="$h2" --header="$h3" "$url"
+                elif [ -n "$h2" ]; then
+                        wget -qO- --header="$h1" --header="$h2" "$url"
+                elif [ -n "$h1" ]; then
+                        wget -qO- --header="$h1" "$url"
+                else
+                        wget -qO- "$url"
+                fi
+                return
+        fi
+
+        return 127
+}
+
+urlencode() {
+        printf '%s' "$1" | jq -sRr @uri
+}
+
+clear_screen() { clear 2>/dev/null || printf '\033c'; }
+
+show_raw_if_debug() {
+        if [ "$DEBUG" -eq 1 ]; then
+                printf '\n%b--- RAW LPAC OUTPUT ---%b\n' "$DIM" "$RESET"
+                _json="$(extract_lpa_json "$1")"
+                if [ -n "$_json" ]; then
+                        printf '%s\n' "$_json" | jq '.'
+                else
+                        printf '%s\n' "$1"
+                fi
+        fi
+}
+
+extract_lpa_json() {
+        _raw="$1"
+        _json="$(printf '%s\n' "$_raw" \
+                | jq -c 'select(type=="object" and .type=="lpa")' 2>/dev/null \
+                | tail -n 1)"
+        if [ -n "$_json" ]; then
+                printf '%s\n' "$_json"
+                return
+        fi
+
+        _json="$(printf '%s\n' "$_raw" \
+                | sed -n '/^[[:space:]]*{/,$p' \
+                | jq -c 'select(type=="object" and .type=="lpa")' 2>/dev/null \
+                | tail -n 1)"
+        if [ -n "$_json" ]; then
+                printf '%s\n' "$_json"
+                return
+        fi
+
+        printf '%s\n' "$_raw" \
+                | sed -n '/^[[:space:]]*{/p' \
+                | while IFS= read -r _line; do
+                        printf '%s\n' "$_line" \
+                                | jq -c 'select(type=="object" and .type=="lpa")' 2>/dev/null
+                done \
+                | tail -n 1
+}
+
+show_lpac_summary() {
+        label="$1"; json="$2"
+        json="$(extract_lpa_json "$json")"
+        # Parse plain fields dari jq tanpa ANSI, warnai di shell via printf %b
+        result="$(printf '%s\n' "$json" | jq -r --arg label "$label" '
+                select(type=="object" and .type=="lpa") |
+                .payload as $p |
+                if ($p.code == 0) then
+                        "ok\t" + $label + "\t" + ($p.message // "success")
+                else
+                        "fail\t" + $label + "\t" + (($p.code // "-")|tostring) + "\t" + ($p.message // "-") + "\t" + (($p.data // "")|tostring)
+                end' 2>/dev/null | tail -n 1)"
+        if [ -z "$result" ]; then
+                show_raw_if_debug "$json"
+                return
+        fi
+        status_field="$(printf '%s' "$result" | cut -f1)"
+        lbl="$(printf '%s' "$result" | cut -f2)"
+        if [ "$status_field" = "ok" ]; then
+                msg="$(printf '%s' "$result" | cut -f3)"
+                printf '\n%b✔  %s%b\n' "$BGREEN$BOLD" "$lbl" "$RESET"
+                printf '%b%-9s%b %b%s%b\n' "$CYAN" "Status :" "$RESET" "$BGREEN" "success" "$RESET"
+                printf '%b%-9s%b %s\n'    "$CYAN" "Pesan  :" "$RESET" "$msg"
+        else
+                code="$(printf '%s' "$result" | cut -f3)"
+                msg="$(printf '%s' "$result" | cut -f4)"
+                data="$(printf '%s' "$result" | cut -f5)"
+                printf '\n%b✘  %s%b\n' "$BRED$BOLD" "$lbl" "$RESET"
+                printf '%b%-9s%b %b%s%b\n' "$CYAN" "Status :" "$RESET" "$BRED"    "failed"  "$RESET"
+                printf '%b%-9s%b %b%s%b\n' "$CYAN" "Kode   :" "$RESET" "$BYELLOW" "$code"   "$RESET"
+                printf '%b%-9s%b %s\n'     "$CYAN" "Pesan  :" "$RESET" "$msg"
+                [ -n "$data" ] && printf '%b%-9s%b %s\n' "$CYAN" "Data   :" "$RESET" "$data"
+        fi
+        show_raw_if_debug "$json"
+}
+
+run_lpac_capture() {
+        stdout_file="/tmp/esim-lpac-stdout.$$"
+        stderr_file="/tmp/esim-lpac-stderr.$$"
+        "$LPAC_BIN" "$@" >"$stdout_file" 2>"$stderr_file"
+        status=$?
+        if [ "$DEBUG" -eq 1 ] && [ -s "$stderr_file" ]; then
+                printf '\n%b--- LPAC STDERR ---%b\n' "$DIM" "$RESET"
+                cat "$stderr_file"
+        fi
+        cat "$stdout_file"
+        rm -f "$stdout_file" "$stderr_file"
+        return $status
+}
+
+get_profiles_json() {
+        _out="$(run_lpac profile list 2>/dev/null)"
+        _json="$(extract_lpa_json "$_out")"
+        [ -n "$_json" ] || return
+        printf '%s\n' "$_json" | jq -c '.payload.data // []' 2>/dev/null
+}
+
+uci_get_esim() {
+        command -v uci >/dev/null 2>&1 || return 1
+        uci -q get "$UCI_CONFIG.$UCI_SECTION.$1" 2>/dev/null
+}
+
+uci_set_esim() {
+        command -v uci >/dev/null 2>&1 || return 1
+        uci -q set "$UCI_CONFIG.$UCI_SECTION.$1=$2"
+}
+
+valid_telegram_token() {
+        printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$'
+}
+
+valid_chat_id() {
+        printf '%s' "$1" | grep -Eq '^-?[0-9]+$'
+}
+
+telegram_bot_status() {
+        if pidof esim-telegram-bot >/dev/null 2>&1; then
+                printf 'running'
+        else
+                printf 'stopped'
+        fi
+}
+
+restart_telegram_bot() {
+        if [ -x /etc/init.d/esim-telegram-bot ]; then
+                /etc/init.d/esim-telegram-bot enable >/dev/null 2>&1
+                /etc/init.d/esim-telegram-bot restart >/dev/null 2>&1
+        fi
+}
+
+telegram_settings_menu() {
+        while :; do
+                clear_screen
+                section_header "TELEGRAM BOT SETTINGS" "$BCYAN"
+                printf '\n'
+                tg_enabled="$(uci_get_esim telegram_enabled)"
+                tg_token="$(uci_get_esim telegram_bot_token)"
+                tg_chat="$(uci_get_esim telegram_allowed_chat_id)"
+                tg_poll="$(uci_get_esim telegram_poll_interval)"
+                tg_debug="$(uci_get_esim telegram_debug)"
+                [ -n "$tg_enabled" ] || tg_enabled="0"
+                [ -n "$tg_poll" ] || tg_poll="2"
+                [ -n "$tg_debug" ] || tg_debug="0"
+                if [ -n "$tg_token" ]; then token_label="set"; else token_label="empty"; fi
+                kv_row "Bot status" "$(telegram_bot_status)" "$CYAN" "$BYELLOW"
+                kv_row "Enabled" "$tg_enabled" "$CYAN" "$WHITE"
+                kv_row "Token" "$token_label" "$CYAN" "$WHITE"
+                kv_row "Allowed Chat ID" "${tg_chat:-empty}" "$CYAN" "$WHITE"
+                kv_row "Poll interval" "${tg_poll}s" "$CYAN" "$WHITE"
+                kv_row "Debug" "$tg_debug" "$CYAN" "$WHITE"
+
+                printf '\n%b╔%s╗%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_item "1" "Enable / Disable bot" "$BOLD$BYELLOW" "$BGREEN" "$BCYAN"
+                box_item "2" "Set bot token" "$BOLD$BYELLOW" "$WHITE" "$BCYAN"
+                box_item "3" "Set allowed chat ID" "$BOLD$BYELLOW" "$WHITE" "$BCYAN"
+                box_item "4" "Set poll interval" "$BOLD$BYELLOW" "$WHITE" "$BCYAN"
+                box_item "5" "Enable / Disable debug log" "$BOLD$BYELLOW" "$WHITE" "$BCYAN"
+                box_item "6" "Save & restart bot" "$BOLD$BYELLOW" "$BGREEN" "$BCYAN"
+                box_item "0" "Back" "$BOLD$DIM" "$DIM" "$BCYAN"
+                printf '%b╚%s╝%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                printf '\n%b  ➤  Pilih menu: %b' "$BCYAN$BOLD" "$RESET"
+                read -r choice
+
+                case "$choice" in
+                        1)
+                                printf 'Enable bot? [y/N]: '; read -r yn
+                                case "$yn" in y|Y) uci_set_esim telegram_enabled 1 ;; *) uci_set_esim telegram_enabled 0 ;; esac
+                                uci commit "$UCI_CONFIG"; restart_telegram_bot ;;
+                        2)
+                                printf 'Paste bot token dari @BotFather: '; read -r token
+                                if [ -z "$token" ]; then
+                                        uci_set_esim telegram_bot_token ''
+                                elif valid_telegram_token "$token"; then
+                                        uci_set_esim telegram_bot_token "$token"
+                                else
+                                        printf '%bToken tidak valid.%b\n' "$BRED" "$RESET"; pause
+                                fi
+                                uci commit "$UCI_CONFIG";;
+                        3)
+                                printf 'Allowed Chat ID (kosongkan untuk /chatid awal): '; read -r chat_id
+                                if [ -z "$chat_id" ] || valid_chat_id "$chat_id"; then
+                                        uci_set_esim telegram_allowed_chat_id "$chat_id"
+                                        uci commit "$UCI_CONFIG"
+                                else
+                                        printf '%bChat ID tidak valid.%b\n' "$BRED" "$RESET"; pause
+                                fi ;;
+                        4)
+                                printf 'Poll interval seconds [1/2/5/10/30]: '; read -r poll
+                                case "$poll" in 1|2|5|10|30) uci_set_esim telegram_poll_interval "$poll"; uci commit "$UCI_CONFIG" ;;
+                                        *) printf '%bInterval tidak valid.%b\n' "$BRED" "$RESET"; pause ;;
+                                esac ;;
+                        5)
+                                printf 'Enable debug log? [y/N]: '; read -r yn
+                                case "$yn" in y|Y) uci_set_esim telegram_debug 1 ;; *) uci_set_esim telegram_debug 0 ;; esac
+                                uci commit "$UCI_CONFIG" ;;
+                        6)
+                                uci commit "$UCI_CONFIG"
+                                restart_telegram_bot
+                                printf '%bTelegram bot settings saved.%b\n' "$BGREEN" "$RESET"
+                                pause ;;
+                        0|q|Q) return ;;
+                        *) printf '%bPilihan tidak dikenal.%b\n' "$BRED" "$RESET"; pause ;;
+                esac
+        done
+}
+
+# ─── Profile table ────────────────────────────────────────────────────────────
+
+print_profiles_table() {
+        profiles_json="$1"
+        printf '\n'
+
+        if [ "$DEBUG" -eq 1 ]; then
+                # DEBUG table header: total 65 columns.
+                table_line "$CYAN" "╔" "╦" "╗" 4 9 22 10 14
+                printf '%b║%b %b%-2s%b %b║%b %b%-7s%b %b║%b %b%-20s%b %b║%b %b%-8s%b %b║%b %b%-12s%b %b║%b\n' \
+                        "$CYAN" "$RESET" \
+                        "$BOLD$WHITE" "No" "$RESET" "$CYAN" \
+                        "$RESET" "$BOLD$WHITE" "State" "$RESET" "$CYAN" \
+                        "$RESET" "$BOLD$WHITE" "ICCID" "$RESET" "$CYAN" \
+                        "$RESET" "$BOLD$WHITE" "Provider" "$RESET" "$CYAN" \
+                        "$RESET" "$BOLD$WHITE" "Nickname" "$RESET" "$CYAN" "$RESET"
+                table_line "$CYAN" "╠" "╬" "╣" 4 9 22 10 14
+
+                total_d="$(printf '%s\n' "$profiles_json" | jq 'length')"
+                cur_d=0
+                printf '%s\n' "$profiles_json" | jq -r '
+                        to_entries[] |
+                        [(.key+1),(.value.profileState//"-"),(.value.iccid//"-"),
+                         (.value.serviceProviderName//"-"),
+                         (.value.profileNickname//.value.profileName//"-")] | @tsv' \
+                | while IFS="$(printf '\t')" read -r no state iccid provider name; do
+                        cur_d=$((cur_d + 1))
+                        if [ "$state" = "enabled" ]; then
+                                rc="$BGREEN"; slabel="enabled"
+                        else
+                                rc="$BBLUE";  slabel="off"
+                        fi
+                        name="$(trim_text "$name" 12)"
+                        provider="$(trim_text "$provider" 8)"
+                        iccid="$(trim_text "$iccid" 20)"
+                        table_row5 "$CYAN" "$no" "$slabel" "$iccid" "$provider" "$name" "$rc"
+                        if [ "$cur_d" -lt "$total_d" ]; then
+                                table_line "$CYAN" "╠" "╬" "╣" 4 9 22 10 14
+                        fi
+                done
+                table_line "$CYAN" "╚" "╩" "╝" 4 9 22 10 14
+
+        else
+                # Normal table
+                table_line "$BCYAN" "╔" "╦" "╗" 4 12 34 10
+                printf '%b║%b %b%-2s%b %b║%b %b%-10s%b %b║%b %b%-32s%b %b║%b %b%-8s%b %b║%b\n' \
+                        "$BCYAN" "$RESET" \
+                        "$BOLD$WHITE" "No" "$RESET" "$BCYAN" \
+                        "$RESET" "$BOLD$WHITE" "Provider" "$RESET" "$BCYAN" \
+                        "$RESET" "$BOLD$WHITE" "Nickname / Profile Name" "$RESET" "$BCYAN" \
+                        "$RESET" "$BOLD$WHITE" "Status" "$RESET" "$BCYAN" "$RESET"
+                table_line "$BCYAN" "╠" "╬" "╣" 4 12 34 10
+
+                total="$(printf '%s\n' "$profiles_json" | jq 'length')"
+                cur=0
+                printf '%s\n' "$profiles_json" | jq -r '
+                        to_entries[] |
+                        [(.key+1),(.value.profileState//"-"),
+                         (.value.serviceProviderName//"-"),
+                         (.value.profileNickname//.value.profileName//"-")] | @tsv' \
+                | while IFS="$(printf '\t')" read -r no state provider name; do
+                        cur=$((cur + 1))
+                        if [ "$state" = "enabled" ]; then
+                                rc="$BGREEN"
+                                bg="$BG_GREEN"; label=" ACTIVE "
+                        else
+                                rc="$BBLUE"
+                                bg="$BG_BLUE"; label="  OFF   "
+                        fi
+                        provider="$(trim_text "$provider" 10)"
+                        name="$(trim_text "$name" 32)"
+                        printf '%b║%b %b%-2s%b %b║%b %b%-10s%b %b║%b %b%-32s%b %b║%b %b%b%b%s%b %b║%b\n' \
+                                "$BCYAN" "$RESET" \
+                                "$BOLD$BYELLOW" "$no" "$RESET" "$BCYAN" \
+                                "$RESET" "$rc" "$provider" "$RESET" "$BCYAN" \
+                                "$RESET" "$rc" "$name" "$RESET" "$BCYAN" \
+                                "$RESET" "$bg" "$BOLD" "$WHITE" "$label" "$RESET" "$BCYAN" "$RESET"
+                        if [ "$cur" -lt "$total" ]; then
+                                table_line "$BCYAN" "╠" "╬" "╣" 4 12 34 10
+                        fi
+                done
+                table_line "$BCYAN" "╚" "╩" "╝" 4 12 34 10
+        fi
+}
+
+# ─── Select profile ───────────────────────────────────────────────────────────
+
+select_profile() {
+        _skip_table="${1:-}"
+        profiles_json="$(get_profiles_json)"
+        if [ -z "$profiles_json" ]; then
+                printf '%bGagal membaca profile list. Pastikan jq terinstall dan LPAC normal.%b\n' "$BRED" "$RESET" >&2
+                return 1
+        fi
+
+        count="$(printf '%s\n' "$profiles_json" | jq 'length')"
+        if [ "$count" -eq 0 ]; then
+                printf '%bTidak ada profile eSIM.%b\n' "$BYELLOW" "$RESET"
+                return 1
+        fi
+
+        if [ "$_skip_table" != "--no-table" ]; then
+                print_profiles_table "$profiles_json" >&2
+        fi
+        printf '\n%b  ➤  Pilih nomor profile: %b' "$BYELLOW$BOLD" "$RESET" >&2
+        read -r idx
+
+        case "$idx" in
+                ''|*[!0-9]*)
+                        printf '%bNomor tidak valid.%b\n' "$BRED" "$RESET" >&2
+                        return 1 ;;
+        esac
+
+        if [ "$idx" -lt 1 ] || [ "$idx" -gt "$count" ]; then
+                printf '%bNomor di luar range.%b\n' "$BRED" "$RESET" >&2
+                return 1
+        fi
+
+        printf '%s\n' "$profiles_json" | jq -r ".[$((idx - 1))].iccid // .[$((idx - 1))].isdpAid"
+}
+
+# ─── Modem helpers ────────────────────────────────────────────────────────────
+
+disconnect_modemmanager() {
+        if ! command -v mmcli >/dev/null 2>&1; then return 0; fi
+        mmcli -L 2>/dev/null | sed -n 's#.*Modem/\([0-9][0-9]*\).*#\1#p' | while read -r modem_id; do
+                [ -n "$modem_id" ] || continue
+                mmcli -m "$modem_id" --simple-disconnect >/dev/null 2>&1
+        done
+}
+
+safe_switch_profile() {
+        check_luci_lock || return 1
+        iccid="$1"
+        section_header "SAFE SWITCH PROFILE" "$BYELLOW"
+        printf '\n'
+        kv_row "Langkah 1" "ifdown $NETIFD_IFACE" "$CYAN" "$WHITE"
+        kv_row "Langkah 2" "Disconnect bearer ModemManager" "$CYAN" "$WHITE"
+        kv_row "Langkah 3" "Enable profile (refreshflag=$SWITCH_REFRESH_FLAG)" "$CYAN" "$WHITE"
+        kv_row "Langkah 4" "ifup $NETIFD_IFACE" "$CYAN" "$WHITE"
+        printf '\n  %bTarget ICCID : %b%s%b\n' "$CYAN" "$BOLD$BYELLOW" "$iccid" "$RESET"
+
+        printf '\n%b  ➤  Lanjut switch? [y/N] %b' "$BRED$BOLD" "$RESET"
+        read -r yn
+        case "$yn" in y|Y) ;; *) return 0 ;; esac
+
+        printf '\n  %b↓%b  Menurunkan interface %b%s%b...\n' "$BYELLOW" "$RESET" "$BOLD" "$NETIFD_IFACE" "$RESET"
+        ifdown "$NETIFD_IFACE" >/dev/null 2>&1
+        sleep 2
+
+        printf '  %b⊗%b  Disconnect bearer ModemManager...\n' "$BRED" "$RESET"
+        disconnect_modemmanager
+        sleep 2
+
+        printf '  %b✦%b  Enable profile eSIM...\n' "$BCYAN" "$RESET"
+        json="$(run_lpac_capture profile enable "$iccid" "$SWITCH_REFRESH_FLAG")"
+        show_lpac_summary "SWITCH PROFILE" "$json"
+
+        printf '\n  %b⏳%b  Menunggu modem memproses SIM refresh...\n' "$BYELLOW" "$RESET"
+        sleep 8
+
+        printf '  %b↑%b  Menaikkan interface %b%s%b...\n' "$BGREEN" "$RESET" "$BOLD" "$NETIFD_IFACE" "$RESET"
+        ifup "$NETIFD_IFACE" >/dev/null 2>&1
+
+        printf '\n  %b✔%b  Selesai. Jika SIM missing, jalankan menu Recovery.\n' "$BGREEN$BOLD" "$RESET"
+        if command -v mmcli >/dev/null 2>&1; then
+                mmcli -L 2>/dev/null
+        fi
+}
+
+# ─── USB recovery ─────────────────────────────────────────────────────────────
+
+find_l850gl_usb_device() {
+        for dev in /sys/bus/usb/devices/*; do
+                [ -f "$dev/idVendor" ] || continue
+                [ -f "$dev/idProduct" ] || continue
+                vendor="$(cat "$dev/idVendor" 2>/dev/null)"
+                product="$(cat "$dev/idProduct" 2>/dev/null)"
+                if [ "$vendor" = "2cb7" ] && [ "$product" = "0007" ]; then
+                        basename "$dev"; return 0
+                fi
+        done
+        return 1
+}
+
+recover_sim_missing() {
+        check_luci_lock || return
+        usb_dev="$(find_l850gl_usb_device)"
+        if [ -z "$usb_dev" ]; then
+                printf '\n%b  ✘  USB L850GL 2cb7:0007 tidak ditemukan di sysfs.%b\n' "$BRED$BOLD" "$RESET"
+                return 1
+        fi
+
+        section_header "RECOVERY SIM MISSING" "$BRED"
+        printf '\n'
+        kv_row "USB Device" "$usb_dev" "$CYAN" "$BYELLOW"
+        printf '\n  %b⚠  Recovery akan reset logical USB device.%b\n' "$BYELLOW$BOLD" "$RESET"
+        printf '  %bJika kernel macet di USB, mungkin perlu cabut-colok power.%b\n' "$DIM" "$RESET"
+
+        printf '\n%b  ➤  Lanjut recovery? [y/N] %b' "$BRED$BOLD" "$RESET"
+        read -r yn
+        case "$yn" in y|Y) ;; *) return 0 ;; esac
+
+        printf '\n  %b↓%b  Menurunkan interface...\n' "$BYELLOW" "$RESET"
+        ifdown "$NETIFD_IFACE" >/dev/null 2>&1
+        disconnect_modemmanager
+        /etc/init.d/modemmanager stop >/dev/null 2>&1
+        sleep 2
+
+        if [ -w "/sys/bus/usb/devices/$usb_dev/authorized" ]; then
+                printf '  %b⊗%b  USB deauthorize %b%s%b...\n' "$BRED" "$RESET" "$BOLD" "$usb_dev" "$RESET"
+                echo 0 >"/sys/bus/usb/devices/$usb_dev/authorized" 2>/dev/null
+                sleep 4
+                printf '  %b✦%b  USB authorize %b%s%b...\n' "$BGREEN" "$RESET" "$BOLD" "$usb_dev" "$RESET"
+                echo 1 >"/sys/bus/usb/devices/$usb_dev/authorized" 2>/dev/null
+        else
+                printf '  %b⚠%b  authorized tidak writable; coba unbind/bind USB...\n' "$BYELLOW" "$RESET"
+                echo "$usb_dev" >/sys/bus/usb/drivers/usb/unbind 2>/dev/null
+                sleep 4
+                echo "$usb_dev" >/sys/bus/usb/drivers/usb/bind 2>/dev/null
+        fi
+
+        sleep 8
+        printf '  %b▶%b  Memulai ModemManager...\n' "$BCYAN" "$RESET"
+        /etc/init.d/modemmanager start >/dev/null 2>&1
+        sleep 8
+        printf '  %b↑%b  Menaikkan interface...\n' "$BGREEN" "$RESET"
+        ifup "$NETIFD_IFACE" >/dev/null 2>&1
+
+        section_header "STATUS SETELAH RECOVERY" "$BGREEN"
+        lsusb 2>/dev/null | grep '2cb7:0007'
+        mmcli -L 2>/dev/null
+        json="$(run_lpac_capture chip info)"
+        show_lpac_summary "CHIP INFO" "$json"
+}
+
+# ─── Quota check ───────────────────────────────────────────────────────────────
+
+normalize_msisdn() {
+        num="$(clean_text "$1" | sed 's/[^0-9+]//g')"
+        [ -n "$num" ] || return 1
+        case "$num" in +*) num="${num#+}" ;; esac
+        case "$num" in
+                0*) num="62${num#0}" ;;
+                8*) num="62$num" ;;
+        esac
+        case "$num" in
+                ''|*[!0-9]*) return 1 ;;
+        esac
+        len=${#num}
+        [ "$len" -ge 10 ] && [ "$len" -le 15 ] || return 1
+        printf '%s\n' "$num"
+}
+
+extract_msisdn_from_profile_text() {
+        printf '%s\n' "$(clean_text "$1")" \
+                | grep -Eo '(\+?62|0|8)[0-9][0-9 .()-]{7,17}' \
+                | head -n 1 \
+                | while read -r candidate; do normalize_msisdn "$candidate"; break; done
+}
+
+select_profile_field() {
+        field="${1:-iccid}"
+        profiles_json="$(get_profiles_json)"
+        if [ -z "$profiles_json" ]; then
+                printf '%bGagal membaca profile list. Pastikan jq terinstall dan LPAC normal.%b\n' "$BRED" "$RESET" >&2
+                return 1
+        fi
+
+        count="$(printf '%s\n' "$profiles_json" | jq 'length')"
+        if [ "$count" -eq 0 ]; then
+                printf '%bTidak ada profile eSIM.%b\n' "$BYELLOW" "$RESET" >&2
+                return 1
+        fi
+
+        printf '\n%b  ➤  Pilih nomor profile: %b' "$BYELLOW$BOLD" "$RESET" >&2
+        read -r idx
+        case "$idx" in
+                ''|*[!0-9]*) printf '%bNomor tidak valid.%b\n' "$BRED" "$RESET" >&2; return 1 ;;
+        esac
+        if [ "$idx" -lt 1 ] || [ "$idx" -gt "$count" ]; then
+                printf '%bNomor di luar range.%b\n' "$BRED" "$RESET" >&2
+                return 1
+        fi
+
+        jq_filter='.[$idx] | {
+                iccid: (.iccid // .isdpAid // ""),
+                provider: (.serviceProviderName // "-"),
+                name: (.profileNickname // .profileName // "-"),
+                state: (.profileState // "-")
+        }'
+        profile="$(printf '%s\n' "$profiles_json" | jq -c --argjson idx "$((idx - 1))" "$jq_filter" 2>/dev/null)"
+        case "$field" in
+                json) printf '%s\n' "$profile" ;;
+                *) json_get "$profile" ".$field" ;;
+        esac
+}
+
+format_quota_value() {
+        val="$1"
+        [ -n "$val" ] && [ "$val" != "null" ] || val="-"
+        printf '%s' "$val"
+}
+
+telegram_html_escape() {
+        sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
+
+telegram_quota_bar() {
+        pct="${1:-0}"
+        case "$pct" in ''|*[!0-9]*) pct=0 ;; esac
+        [ "$pct" -gt 100 ] && pct=100
+        filled=$(( (pct + 5) / 10 ))
+        [ "$filled" -gt 10 ] && filled=10
+        empty=$((10 - filled))
+        bar=''
+        i=0
+        while [ "$i" -lt "$filled" ]; do bar="${bar}▓"; i=$((i + 1)); done
+        i=0
+        while [ "$i" -lt "$empty" ]; do bar="${bar}░"; i=$((i + 1)); done
+        printf '[%s %d%%]' "$bar" "$pct"
+}
+
+size_to_mb() {
+        awk -v s="$1" '
+                BEGIN {
+                        gsub(/,/, "", s)
+                        if (match(s, /[0-9]+(\.[0-9]+)?/)) n = substr(s, RSTART, RLENGTH) + 0
+                        else { print 0; exit }
+                        u = toupper(s)
+                        if (u ~ /TB/) n *= 1024 * 1024
+                        else if (u ~ /GB/) n *= 1024
+                        else if (u ~ /KB/) n /= 1024
+                        print int(n + 0.5)
+                }'
+}
+
+quota_percent() {
+        remain_mb="$(size_to_mb "$1")"
+        total_mb="$(size_to_mb "$2")"
+        awk -v r="$remain_mb" -v t="$total_mb" '
+                BEGIN {
+                        if (t <= 0) print "";
+                        else {
+                                p = int((r / t) * 100 + 0.5)
+                                if (p < 0) p = 0
+                                if (p > 100) p = 100
+                                print p
+                        }
+                }'
+}
+
+quota_bar() {
+        pct="$1"
+        case "$pct" in ''|*[!0-9]*) return 1 ;; esac
+        filled=$(( (pct + 5) / 10 ))
+        [ "$filled" -lt 0 ] && filled=0
+        [ "$filled" -gt 10 ] && filled=10
+        empty=$((10 - filled))
+        printf '[%s%s] %s%%' "$(repeat_char '#' "$filled")" "$(repeat_char '-' "$empty")" "$pct"
+}
+
+quota_color() {
+        pct="$1"
+        case "$pct" in ''|*[!0-9]*) printf '%s' "$WHITE"; return ;; esac
+        if [ "$pct" -ge 60 ]; then printf '%s' "$BGREEN"
+        elif [ "$pct" -ge 25 ]; then printf '%s' "$BYELLOW"
+        else printf '%s' "$BRED"
+        fi
+}
+
+print_quota_package() {
+        title="$1"; expiry="$2"; benefit="$3"; total="$4"; remain="$5"; percent="$6"
+        [ -n "$title" ] || return
+        _info_sep
+        _info_kv "Paket" "$title" "$CYAN" "$BYELLOW"
+        [ -n "$expiry" ] && [ "$expiry" != "-" ] && _info_kv "Exp" "$expiry" "$CYAN" "$BGREEN"
+        [ -n "$benefit" ] && [ "$benefit" != "-" ] && _info_kv "Benefit" "$benefit" "$CYAN" "$WHITE"
+        if [ -n "$total" ] && [ "$total" != "-" ]; then
+                if [ -n "$remain" ] && [ "$remain" != "-" ]; then
+                        [ -n "$percent" ] || percent="$(quota_percent "$remain" "$total")"
+                        _info_kv "Sisa" "$remain / $total" "$CYAN" "$(quota_color "$percent")"
+                        bar="$(quota_bar "$percent")" && _info_kv "Bar" "$bar" "$CYAN" "$(quota_color "$percent")"
+                else
+                        _info_kv "Kuota" "$total" "$CYAN" "$BGREEN"
+                fi
+        fi
+}
+
+print_kmsp_packages() {
+        hasil="$1"
+        parsed="$(printf '%s\n' "$hasil" \
+                | sed 's/<br[^>]*>/|/g; s/<[^>]*>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/=//g' | tr '|' '\n' \
+                | awk '
+                        function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+                        function clean_prefix(s) { gsub(/^[^A-Za-z0-9]+/, "", s); return trim(s) }
+                        function flush() {
+                                if (name != "") print name "\t" expiry "\t" benefit "\t" total "\t" remain
+                                name=""; expiry=""; benefit=""; total=""; remain=""
+                        }
+                        {
+                                line=clean_prefix($0)
+                                if (line == "" || line == "RESULT:") next
+                                if (line ~ /^Quota:/) {
+                                        flush()
+                                        name=line
+                                        sub(/^Quota:[ \t]*/, "", name)
+                                } else if (line ~ /^Benefit:/) {
+                                        v=line; sub(/^Benefit:[ \t]*/, "", v)
+                                        if (name == "") name=v
+                                        else benefit=v
+                                } else if (line ~ /^Kuota:/) {
+                                        total=line; sub(/^Kuota:[ \t]*/, "", total)
+                                } else if (line ~ /^Sisa Kuota:/) {
+                                        remain=line; sub(/^Sisa Kuota:[ \t]*/, "", remain)
+                                } else if (line ~ /^Aktif Hingga:/) {
+                                        expiry=line; sub(/^Aktif Hingga:[ \t]*/, "", expiry)
+                                }
+                        }
+                        END { flush() }')"
+        if [ -z "$parsed" ]; then
+                cleaned="$(printf '%s\n' "$hasil" \
+                        | sed 's/<br[^>]*>/|/g; s/<[^>]*>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/=//g' \
+                        | tr '|' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+                        | grep -v -E '^(RESULT:)?$' | head -n 30)"
+                if [ -n "$cleaned" ]; then
+                        printf '%s\n' "$cleaned" | while IFS= read -r line; do
+                                _info_kv "Paket" "$line" "$CYAN" "$BYELLOW"
+                        done
+                else
+                        _info_kv "Paket" "Tidak ada detail paket" "$CYAN" "$BYELLOW"
+                fi
+                return
+        fi
+        printf '%s\n' "$parsed" | while IFS="$(printf '\t')" read -r name exp benefit total remain; do
+                print_quota_package "$name" "$exp" "$benefit" "$total" "$remain" ""
+        done
+}
+
+print_quota_box() {
+        msisdn="$1"; source="$2"; data="$3"
+        printf '\n  %b📶  Cek Kuota XL%b  %b%s%b  %bvia %s%b\n' "$BOLD$BCYAN" "$RESET" "$BYELLOW$BOLD" "$msisdn" "$RESET" "$DIM" "$source" "$RESET"
+        box_top
+        box_center "CEK KUOTA XL" "$BOLD$BCYAN$BG_BLACK" "$BCYAN"
+        box_sep
+        _info_kv "No XL" "$msisdn" "$CYAN" "$BYELLOW"
+        _info_kv "API" "$source" "$CYAN" "$WHITE"
+
+        if [ "$source" = "Bendith" ]; then
+                info="$(printf '%s\n' "$data" | jq -c '.data.subs_info // {}')"
+                pkgs="$(printf '%s\n' "$data" | jq -c '.data.package_info.packages // []')"
+                _info_kv "Kartu" "$(format_quota_value "$(json_get "$info" '.operator')")" "$CYAN" "$WHITE"
+                _info_kv "Aktif" "$(format_quota_value "$(json_get "$info" '.exp_date')")" "$CYAN" "$BGREEN"
+                _info_kv "Tenggang" "$(format_quota_value "$(json_get "$info" '.grace_until')")" "$CYAN" "$WHITE"
+                _info_kv "Jaringan" "$(format_quota_value "$(json_get "$info" '.net_type')")" "$CYAN" "$WHITE"
+                _info_sep
+                _info_title "-- Paket Data --" "$BBLUE"
+                total="$(printf '%s\n' "$pkgs" | jq 'length')"
+                if [ "$total" -eq 0 ]; then
+                        _info_kv "Paket" "Tidak ada info paket" "$CYAN" "$BYELLOW"
+                else
+                        printf '%s\n' "$pkgs" | jq -r '
+                                .[] as $p |
+                                ($p.quotas // $p.quota // $p.quota_details // $p.benefits // []) as $qs |
+                                if (($qs | type) == "array" and ($qs | length) > 0) then
+                                        $qs[] |
+                                        [($p.name // $p.package_name // $p.packageName // $p.title // $p.package // "-"),
+                                         ($p.expiry // $p.expired_at // $p.exp_date // $p.active_until // "-"),
+                                         (.name // .quota_name // .benefit // .title // "-"),
+                                         (.total // .quota // .amount // .volume // "-"),
+                                         (.remaining // .remain // .sisa // .balance // "-"),
+                                         ((.percent // .percentage // "")|tostring)] | @tsv
+                                else
+                                        [($p.name // $p.package_name // $p.packageName // $p.title // $p.package // "-"),
+                                         ($p.expiry // $p.expired_at // $p.exp_date // $p.active_until // "-"),
+                                         ($p.benefit // $p.description // $p.desc // "-"),
+                                         ($p.total // $p.quota // $p.amount // "-"),
+                                         ($p.remaining // $p.remain // $p.sisa // "-"),
+                                         ((($p.percent // $p.percentage) // "")|tostring)] | @tsv
+                                end' \
+                        | while IFS="$(printf '\t')" read -r pkg exp qname total_q remain_q pct; do
+                                if [ "$qname" = "-" ] || [ "$qname" = "$pkg" ]; then
+                                        title="$pkg"
+                                else
+                                        title="$pkg - $qname"
+                                fi
+                                print_quota_package "$title" "$exp" "" "$total_q" "$remain_q" "$pct"
+                        done
+                fi
+        else
+                sp="$(printf '%s\n' "$data" | jq -c '.data.data_sp // {}')"
+                _info_kv "Kartu" "$(format_quota_value "$(json_get "$sp" '.prefix.value')")" "$CYAN" "$WHITE"
+                _info_kv "Aktif" "$(format_quota_value "$(json_get "$sp" '.active_period.value')")" "$CYAN" "$BGREEN"
+                _info_kv "Tenggang" "$(format_quota_value "$(json_get "$sp" '.grace_period.value')")" "$CYAN" "$WHITE"
+                _info_kv "Status 4G" "$(format_quota_value "$(json_get "$sp" '.status_4g.value')")" "$CYAN" "$WHITE"
+                hasil="$(printf '%s\n' "$data" | jq -r '.data.hasil // empty')"
+                _info_sep
+                _info_title "-- Paket Data --" "$BBLUE"
+                print_kmsp_packages "$hasil"
+        fi
+        box_bottom
+}
+
+check_quota_msisdn() {
+        msisdn="$1"
+        encoded="$(urlencode "$msisdn")"
+        printf '\n  %b⏳%b  Mengecek kuota nomor %b%s%b...\n' "$BYELLOW" "$RESET" "$BOLD" "$msisdn" "$RESET"
+
+        bendith_url="https://bendith.my.id/end.php?check=package&number=$encoded&version=2"
+        response="$(http_get "$bendith_url" 2>/dev/null)"
+        if printf '%s\n' "$response" | jq -e '.success == true and (.data.subs_info != null)' >/dev/null 2>&1; then
+                print_quota_box "$msisdn" "Bendith" "$response"
+                return 0
+        fi
+
+        kmsp_url="https://apigw.kmsp-store.com/sidompul/v4/cek_kuota?msisdn=$encoded&isJSON=true"
+        response="$(http_get "$kmsp_url" \
+                -H 'Authorization: Basic c2lkb21wdWxhcGk6YXBpZ3drbXNw' \
+                -H 'X-API-Key: 60ef29aa-a648-4668-90ae-20951ef90c55' \
+                -H 'X-App-Version: 4.0.0' 2>/dev/null)"
+        if printf '%s\n' "$response" | jq -e '.status == true' >/dev/null 2>&1; then
+                print_quota_box "$msisdn" "KMSP" "$response"
+                return 0
+        fi
+
+        printf '\n%b  ✘  Gagal cek kuota atau nomor tidak ditemukan.%b\n' "$BRED$BOLD" "$RESET"
+        if [ "$DEBUG" -eq 1 ] && [ -n "$response" ]; then
+                printf '\n%b--- RAW KUOTA RESPONSE ---%b\n' "$DIM" "$RESET"
+                printf '%s\n' "$response" | jq '.' 2>/dev/null || printf '%s\n' "$response"
+        fi
+        return 1
+}
+
+telegram_quota_kmsp() {
+        msisdn="$1"
+        encoded="$2"
+        masked="$3"
+        kmsp_url="https://apigw.kmsp-store.com/sidompul/v4/cek_kuota?msisdn=$encoded&isJSON=true"
+        response="$(http_get "$kmsp_url" \
+                -H 'Authorization: Basic c2lkb21wdWxhcGk6YXBpZ3drbXNw' \
+                -H 'X-API-Key: 60ef29aa-a648-4668-90ae-20951ef90c55' \
+                -H 'X-App-Version: 4.0.0' 2>/dev/null)" || return 1
+        printf '%s\n' "$response" | jq -e '.status == true' >/dev/null 2>&1 || return 1
+
+        sp="$(printf '%s\n' "$response" | jq -c '.data.data_sp // {}')"
+        operator="$(format_quota_value "$(json_get "$sp" '.prefix.value')")"
+        net="$(format_quota_value "$(json_get "$sp" '.status_4g.value')")"
+        active_until="$(format_quota_value "$(json_get "$sp" '.active_period.value')")"
+        grace_until="$(format_quota_value "$(json_get "$sp" '.grace_period.value')")"
+        hasil="$(printf '%s\n' "$response" | jq -r '.data.hasil // empty')"
+        clean="${TMPDIR:-/tmp}/tg-quota-kmsp-clean.$$"
+        rows="${TMPDIR:-/tmp}/tg-quota-kmsp-rows.$$"
+
+        printf '%s\n' "$hasil" \
+                | sed 's/<br[^>]*>/|/g; s/<[^>]*>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/=//g' \
+                | tr '|' '\n' \
+                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' > "$clean"
+        awk '
+                function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+                function clean_prefix(s) { gsub(/^[^A-Za-z0-9]+/, "", s); return trim(s) }
+                function flush() {
+                        if (name == "") return
+                        print "ROW\t" name "\t" expiry "\t" benefit "\t" total "\t" remain
+                        name=""; expiry=""; benefit=""; total=""; remain=""
+                }
+                BEGIN { name=""; expiry=""; benefit=""; total=""; remain="" }
+                {
+                        line=clean_prefix($0)
+                        if (line == "" || line == "RESULT:") next
+                        if (line ~ /^Quota:/) {
+                                flush()
+                                name=line; sub(/^Quota:[ \t]*/, "", name)
+                        } else if (line ~ /^Aktif Hingga:/) {
+                                expiry=line; sub(/^Aktif Hingga:[ \t]*/, "", expiry)
+                        } else if (line ~ /^Benefit:/) {
+                                v=line; sub(/^Benefit:[ \t]*/, "", v)
+                                if (name == "") name=v; else benefit=v
+                        } else if (line ~ /^Sisa Kuota:/) {
+                                remain=line; sub(/^Sisa Kuota:[ \t]*/, "", remain)
+                        } else if (line ~ /^Kuota:/) {
+                                total=line; sub(/^Kuota:[ \t]*/, "", total)
+                        }
+                }
+                END { flush() }' "$clean" > "$rows"
+
+        if [ ! -s "$rows" ]; then
+                if [ -n "${TELEGRAM_QUOTA_KMSP_EMPTY_OUT:-}" ]; then
+                        {
+                                printf '✅ <b>Cek Kuota XL</b>\n'
+                                printf '📱 Nomor: <code>%s</code>\n' "$masked"
+                                printf '💳 Operator: %s\n' "$(printf '%s' "$operator" | telegram_html_escape)"
+                                printf '📶 Status 4G: %s\n' "$(printf '%s' "$net" | telegram_html_escape)"
+                                printf '⏰ Masa Aktif: %s\n' "$(printf '%s' "$active_until" | telegram_html_escape)"
+                                printf '⚠️ Masa Tenggang: %s\n' "$(printf '%s' "$grace_until" | telegram_html_escape)"
+                                printf '📊 <b>Detail Kuota:</b>\n'
+                                printf '\n• Tidak ada info paket data.\n'
+                        } > "$TELEGRAM_QUOTA_KMSP_EMPTY_OUT"
+                fi
+                rm -f "$clean" "$rows"
+                return 2
+        fi
+
+        printf '✅ <b>Cek Kuota XL</b>\n'
+        printf '📱 Nomor: <code>%s</code>\n' "$masked"
+        printf '💳 Operator: %s\n' "$(printf '%s' "$operator" | telegram_html_escape)"
+        printf '📶 Status 4G: %s\n' "$(printf '%s' "$net" | telegram_html_escape)"
+        printf '⏰ Masa Aktif: %s\n' "$(printf '%s' "$active_until" | telegram_html_escape)"
+        printf '⚠️ Masa Tenggang: %s\n' "$(printf '%s' "$grace_until" | telegram_html_escape)"
+        printf '📊 <b>Detail Kuota:</b>\n'
+
+        while IFS="$(printf '\t')" read -r _rtype name expiry benefit total remain; do
+                [ -n "$name" ] && [ "$name" != "-" ] || continue
+                pct="$(quota_percent "$remain" "$total")"
+                [ -n "$pct" ] || pct=0
+                name_e="$(printf '%s' "$name" | telegram_html_escape)"
+                expiry_e="$(printf '%s' "$expiry" | telegram_html_escape)"
+                total_e="$(printf '%s' "$total" | telegram_html_escape)"
+                remain_e="$(printf '%s' "$remain" | telegram_html_escape)"
+                printf '\n'
+                if [ -n "$expiry" ] && [ "$expiry" != "-" ]; then
+                        printf '📦 %s — Exp: %s\n' "$name_e" "$expiry_e"
+                else
+                        printf '📦 %s\n' "$name_e"
+                fi
+                if [ -n "$total" ] && [ "$total" != "-" ] && [ "$total" != "null" ]; then
+                        if [ -n "$remain" ] && [ "$remain" != "-" ] && [ "$remain" != "null" ]; then
+                                printf '• Kuota: %s / %s\n' "$remain_e" "$total_e"
+                                printf '• <code>%s</code>\n' "$(telegram_quota_bar "$pct")"
+                        else
+                                printf '• Kuota: %s\n' "$total_e"
+                        fi
+                fi
+        done < "$rows"
+        rm -f "$clean" "$rows"
+        return 0
+}
+
+telegram_quota_msisdn() {
+        msisdn="$(normalize_msisdn "$1")" || {
+                printf 'Nomor tidak valid.\n'
+                return 1
+        }
+        encoded="$(urlencode "$msisdn")"
+
+        # ── Mask MSISDN for display (e.g. 6285*****84) ──────────────────
+        mask_msisdn() {
+                _m="$1"
+                _len="${#_m}"
+                if [ "$_len" -gt 6 ]; then
+                        _prefix="${_m%????????*}"
+                        _suffix="${_m#"${_m%??}"}"   # last 2 chars
+                        _stars="*****"
+                        printf '%s%s%s' "$_prefix" "$_stars" "$_suffix"
+                else
+                        printf '%s' "$_m"
+                fi
+        }
+        _masked="$(mask_msisdn "$msisdn")"
+        _kmsp_empty="${TMPDIR:-/tmp}/tg-quota-kmsp-empty.$$"
+        TELEGRAM_QUOTA_KMSP_EMPTY_OUT="$_kmsp_empty" telegram_quota_kmsp "$msisdn" "$encoded" "$_masked"
+        _kmsp_rc=$?
+        [ "$_kmsp_rc" -eq 0 ] && { rm -f "$_kmsp_empty"; return 0; }
+
+        # ── Progress bar (10 blocks) ─────────────────────────────────────
+        tg_bar() {
+                _pct="${1:-0}"
+                case "$_pct" in ''|*[!0-9]*) _pct=0 ;; esac
+                [ "$_pct" -gt 100 ] && _pct=100
+                _filled=$(( (_pct + 5) / 10 ))
+                [ "$_filled" -gt 10 ] && _filled=10
+                _empty=$((10 - _filled))
+                _b=""
+                _i=0
+                while [ "$_i" -lt "$_filled" ]; do _b="${_b}▓"; _i=$((_i+1)); done
+                _i=0
+                while [ "$_i" -lt "$_empty" ]; do _b="${_b}░"; _i=$((_i+1)); done
+                printf '[%s %d%%]' "$_b" "$_pct"
+        }
+
+        # ── Try Bendith API ──────────────────────────────────────────────
+        bendith_url="https://bendith.my.id/end.php?check=package&number=$encoded&version=2"
+        response="$(http_get "$bendith_url" 2>/dev/null)"
+        if printf '%s\n' "$response" | jq -e '.success == true and (.data.subs_info != null)' >/dev/null 2>&1; then
+                info="$(printf '%s\n' "$response" | jq -c '.data.subs_info // {}')"
+                pkgs="$(printf '%s\n' "$response" | jq -c '.data.package_info.packages // []')"
+
+                _operator="$(format_quota_value "$(json_get "$info" '.operator')")"
+                _net="$(format_quota_value "$(json_get "$info" '.net_type')")"
+                _dukcapil="$(format_quota_value "$(json_get "$info" '.dukcapil_status')")"
+                _card_age="$(format_quota_value "$(json_get "$info" '.card_age')")"
+                _exp="$(format_quota_value "$(json_get "$info" '.exp_date')")"
+                _grace="$(format_quota_value "$(json_get "$info" '.grace_until')")"
+
+                # Dukcapil: map value to label
+                case "$_dukcapil" in
+                        1|true|yes|verified) _dukcapil_lbl="Sudah" ;;
+                        0|false|no|unverified) _dukcapil_lbl="Belum" ;;
+                        -) _dukcapil_lbl="-" ;;
+                        *) _dukcapil_lbl="$_dukcapil" ;;
+                esac
+
+                printf '✅ Cek Kuota XL\n'
+                printf '📱 Nomor: `%s`\n' "$_masked"
+                printf '💳 Operator: %s\n' "$_operator"
+                printf '📶 Status 4G: %s\n' "${_net:--}"
+                printf '🧾 Dukcapil: %s\n' "$_dukcapil_lbl"
+                [ "$_card_age" != "-" ] && printf '📅 Umur Kartu: %s\n' "$_card_age"
+                printf '⏰ Masa Aktif: %s\n' "$_exp"
+                printf '⚠️ Masa Tenggang: %s\n' "$_grace"
+                printf '📊 Detail Kuota:\n'
+
+                if [ "$(printf '%s\n' "$pkgs" | jq 'length' 2>/dev/null)" = "0" ]; then
+                        printf '\n• Tidak ada info paket data.\n'
+                        return 0
+                fi
+
+                # Print packages
+                printf '%s\n' "$pkgs" | jq -r '
+                        .[] as $p |
+                        ($p.quotas // $p.quota // $p.quota_details // $p.benefits // []) as $qs |
+                        if (($qs | type) == "array" and ($qs | length) > 0) then
+                                $qs[] |
+                                [
+                                        ($p.name // $p.package_name // $p.packageName // $p.title // $p.package // "-"),
+                                        ($p.expiry // $p.expired_at // $p.exp_date // $p.active_until // ""),
+                                        (.name // .quota_name // .benefit // .title // "-"),
+                                        (.total // .quota // .amount // .volume // "-"),
+                                        (.remaining // .remain // .sisa // .balance // "-"),
+                                        ((.percent // .percentage // "") | tostring)
+                                ] | @tsv
+                        else
+                                [
+                                        ($p.name // $p.package_name // $p.packageName // $p.title // $p.package // "-"),
+                                        ($p.expiry // $p.expired_at // $p.exp_date // $p.active_until // ""),
+                                        ($p.benefit // $p.description // $p.desc // "-"),
+                                        ($p.total // $p.quota // $p.amount // "-"),
+                                        ($p.remaining // $p.remain // $p.sisa // "-"),
+                                        ((($p.percent // $p.percentage) // "") | tostring)
+                                ] | @tsv
+                        end' \
+                | while IFS="$(printf '\t')" read -r pkg exp qname total_q remain_q pct; do
+                        # Build title
+                        if [ -z "$qname" ] || [ "$qname" = "-" ] || [ "$qname" = "$pkg" ]; then
+                                title="$pkg"
+                        else
+                                title="$pkg • $qname"
+                        fi
+                        # Expiry line (only for top-level package, no quota detail)
+                        if [ -z "$total_q" ] || [ "$total_q" = "-" ] || [ "$total_q" = "null" ]; then
+                                if [ -n "$exp" ] && [ "$exp" != "-" ]; then
+                                        printf '📦 %s — Exp: %s\n' "$title" "$exp"
+                                else
+                                        printf '📦 %s\n' "$title"
+                                fi
+                        else
+                                printf '📦 %s • Kuota: %s / %s\n' "$title" "$remain_q" "$total_q"
+                                # Calculate pct if missing
+                                if [ -z "$pct" ] || [ "$pct" = "null" ] || [ "$pct" = "0" ]; then
+                                        _calc_pct="$(quota_percent "$remain_q" "$total_q")"
+                                        [ -n "$_calc_pct" ] && pct="$_calc_pct"
+                                fi
+                                printf '• `%s`\n' "$(tg_bar "${pct:-0}")"
+                        fi
+                done
+                return 0
+        fi
+
+        if [ "${_kmsp_rc:-1}" -eq 2 ] && [ -s "$_kmsp_empty" ]; then
+                cat "$_kmsp_empty"
+                rm -f "$_kmsp_empty"
+                return 0
+        fi
+        rm -f "$_kmsp_empty"
+        printf 'Gagal cek kuota atau nomor tidak ditemukan.\n'
+        return 1
+
+}
+
+check_quota_profile() {
+        profile="$(select_profile_field json)" || return 1
+        iccid="$(json_get "$profile" '.iccid')"
+        provider="$(json_get "$profile" '.provider')"
+        name="$(json_get "$profile" '.name')"
+        msisdn="$(extract_msisdn_from_profile_text "$name")"
+
+        printf '\n'
+        section_header "CEK KUOTA XL PROFILE" "$BGREEN"
+        printf '\n'
+        kv_row "Provider" "$(clean_text "$provider")" "$CYAN" "$WHITE"
+        kv_row "Profile" "$(clean_text "$name")" "$CYAN" "$WHITE"
+        kv_row "ICCID" "$(clean_text "$iccid")" "$CYAN" "$DIM$WHITE"
+
+        if [ -z "$msisdn" ]; then
+                printf '\n%b  ✘  Nomor HP tidak ditemukan di nickname/profile name.%b\n' "$BRED$BOLD" "$RESET"
+                printf '%b  Rename profile dengan nomor (contoh: 08123456789 PRIOH), atau input manual: %b' "$BYELLOW" "$RESET"
+                read -r manual_num
+                msisdn="$(normalize_msisdn "$manual_num")" || {
+                        printf '%b  Nomor tidak valid.%b\n' "$BRED" "$RESET"
+                        return 1
+                }
+        else
+                kv_row "Nomor terdeteksi" "$msisdn" "$CYAN" "$BYELLOW"
+        fi
+
+        check_quota_msisdn "$msisdn"
+}
+
+# ─── Profile menu ─────────────────────────────────────────────────────────────
+
+profile_menu() {
+        while :; do
+                profiles_json="$(get_profiles_json)"
+                if [ -z "$profiles_json" ]; then
+                        printf '\n%bGagal membaca profile list.%b\n' "$BRED" "$RESET"
+                        pause; return
+                fi
+
+                print_profiles_table "$profiles_json"
+
+                printf '\n'
+                printf '%b╔%s╗%b\n' "$BMAGENTA" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_center "AKSI PROFILE" "$BOLD$WHITE$BG_BLACK" "$BMAGENTA"
+                printf '%b╠%s╣%b\n' "$BMAGENTA" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_item "1" "Enable / Switch profile" "$BOLD$BYELLOW" "$WHITE" "$BMAGENTA"
+                box_item "2" "Disable profile" "$BOLD$BYELLOW" "$WHITE" "$BMAGENTA"
+                box_item "3" "Rename / Nickname profile" "$BOLD$BYELLOW" "$WHITE" "$BMAGENTA"
+                box_item "4" "Hapus / Delete profile" "$BOLD$BRED" "$WHITE" "$BMAGENTA"
+                box_item "5" "Cek Kuota XL" "$BOLD$BGREEN" "$WHITE" "$BMAGENTA"
+                box_item "6" "Refresh list" "$BOLD$BCYAN" "$WHITE" "$BMAGENTA"
+                box_item "0" "Kembali ke menu utama" "$BOLD$DIM" "$WHITE" "$BMAGENTA"
+                printf '%b╚%s╝%b\n' "$BMAGENTA" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+
+                printf '\n%b  ➤  Pilih aksi: %b' "$BMAGENTA$BOLD" "$RESET"
+                read -r action
+
+                case "$action" in
+                        1)
+                                iccid="$(select_profile --no-table)" || { pause; continue; }
+                                safe_switch_profile "$iccid"
+                                pause ;;
+                        2)
+                                check_luci_lock || { pause; continue; }
+                                iccid="$(select_profile --no-table)" || { pause; continue; }
+                                printf '%b  ➤  Disable ICCID %s ? [y/N] %b' "$BYELLOW$BOLD" "$iccid" "$RESET"
+                                read -r yn
+                                case "$yn" in
+                                        y|Y)
+                                                json="$(run_lpac_capture profile disable "$iccid" 0)"
+                                                show_lpac_summary "DISABLE PROFILE" "$json" ;;
+                                esac
+                                pause ;;
+                        3)
+                                iccid="$(select_profile --no-table)" || { pause; continue; }
+                                printf '%b  ➤  Nickname baru: %b' "$BCYAN$BOLD" "$RESET"
+                                read -r nickname
+                                json="$(run_lpac_capture profile nickname "$iccid" "$nickname")"
+                                show_lpac_summary "RENAME PROFILE" "$json"
+                                pause ;;
+                        4)
+                                check_luci_lock || { pause; continue; }
+                                iccid="$(select_profile --no-table)" || { pause; continue; }
+                                printf '%b  ➤  HAPUS profile %s ? Ketik DELETE: %b' "$BRED$BOLD" "$iccid" "$RESET"
+                                read -r confirm
+                                if [ "$confirm" = "DELETE" ]; then
+                                        json="$(run_lpac_capture profile delete "$iccid")"
+                                        show_lpac_summary "DELETE PROFILE" "$json"
+                                        printf '\n  %b⚠%b  Jalankan Notification Process setelah delete.\n' "$BYELLOW" "$RESET"
+                                fi
+                                pause ;;
+                        5)
+                                check_quota_profile
+                                pause ;;
+                        6) continue ;;
+                        0) return ;;
+                        *)
+                                printf '%b  Pilihan tidak dikenal.%b\n' "$BRED" "$RESET"
+                                pause ;;
+                esac
+        done
+}
+
+# ─── Download profile ─────────────────────────────────────────────────────────
+
+download_profile() {
+        check_luci_lock || return
+        printf '\n'
+        printf '%b╔%s╗%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+        box_center "DOWNLOAD eSIM Profile" "$BOLD$BCYAN$BG_BLACK" "$BCYAN"
+        printf '%b╠%s╣%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+        box_item "1" "Activation code / QR  ->  LPA:1\$server\$matching-id\$" "$BOLD$BYELLOW" "$WHITE" "$BCYAN"
+        box_item "2" "Pisah SM-DP+ server dan Matching ID" "$BOLD$BYELLOW" "$WHITE" "$BCYAN"
+        printf '%b╠%s╣%b\n' "$BCYAN" "$(repeat_char '─' $((BOX_WIDTH - 2)))" "$RESET"
+        box_item "0" "Kembali" "$BOLD$DIM" "$WHITE" "$BCYAN"
+        printf '%b╚%s╝%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+        printf '\n%b  ➤  Pilih: %b' "$BCYAN$BOLD" "$RESET"
+        read -r mode
+
+        case "$mode" in
+                1)
+                        printf '%b  ➤  Activation code: %b' "$BGREEN$BOLD" "$RESET"
+                        read -r activation_code
+                        [ -n "$activation_code" ] || return
+                        printf '%b  ➤  Confirmation code (kosong jika tidak ada): %b' "$BGREEN$BOLD" "$RESET"
+                        read -r confirmation_code
+                        if [ -n "$confirmation_code" ]; then
+                                json="$(run_lpac_capture profile download -a "$activation_code" -c "$confirmation_code")"
+                        else
+                                json="$(run_lpac_capture profile download -a "$activation_code")"
+                        fi
+                        show_lpac_summary "DOWNLOAD ESIM" "$json"
+                        ;;
+                2)
+                        printf '%b  ➤  SM-DP+ server: %b' "$BGREEN$BOLD" "$RESET"
+                        read -r smdp
+                        printf '%b  ➤  Matching ID / activation code token: %b' "$BGREEN$BOLD" "$RESET"
+                        read -r matching_id
+                        printf '%b  ➤  Confirmation code (kosong jika tidak ada): %b' "$BGREEN$BOLD" "$RESET"
+                        read -r confirmation_code
+                        [ -n "$smdp" ] && [ -n "$matching_id" ] || return
+                        if [ -n "$confirmation_code" ]; then
+                                json="$(run_lpac_capture profile download -s "$smdp" -m "$matching_id" -c "$confirmation_code")"
+                        else
+                                json="$(run_lpac_capture profile download -s "$smdp" -m "$matching_id")"
+                        fi
+                        show_lpac_summary "DOWNLOAD ESIM" "$json"
+                        ;;
+                0) return ;;
+                *) printf '%b  Pilihan tidak dikenal.%b\n' "$BRED" "$RESET" ;;
+        esac
+
+        printf '\n  %b⚠%b  Setelah download sukses, jalankan Notification Process.\n' "$BYELLOW$BOLD" "$RESET"
+        pause
+}
+
+# ─── Notification process ─────────────────────────────────────────────────────
+
+process_notifications() {
+        check_luci_lock || return
+        section_header "NOTIFICATION PROCESS" "$BCYAN"
+        printf '\n  %bNotification adalah laporan ke server operator%b\n' "$DIM" "$RESET"
+        printf '  %bsetelah download/delete/enable/disable profile.%b\n\n' "$DIM" "$RESET"
+        printf '  %b⏳%b  Memproses semua pending notification...\n' "$BYELLOW" "$RESET"
+        json="$(run_lpac_capture notification process -a -r)"
+        show_lpac_summary "NOTIFICATION" "$json"
+}
+
+# ─── Info EID ─────────────────────────────────────────────────────────────────
+
+# Helper: print a key-value row inside the info box
+_info_kv() {
+        key="$1"; val="$2"; kc="${3:-$CYAN}"; vc="${4:-$WHITE}"
+        # Truncate value to fit box: BOX_WIDTH - 2 (border) - 2 (pad) - 22 (key) - 1 (space) = 38
+        val="$(pad_right "$val" 36)"
+        key="$(pad_right "$key" 22)"
+        printf '%b║%b %b%s%b %b│%b %b%s%b %b║%b\n' \
+                "$BCYAN" "$RESET" \
+                "$kc$BOLD" "$key" "$RESET" \
+                "$BCYAN" "$RESET" "$vc" "$val" "$RESET" \
+                "$BCYAN" "$RESET"
+}
+
+# Helper: separator inside box
+_info_sep() {
+        printf '%b╟%s┼%s╢%b\n' "$BCYAN" "$(repeat_char '─' 24)" "$(repeat_char '─' 38)" "$RESET"
+}
+
+# Helper: centered title row inside box
+_info_title() {
+        text="$1"; color="${2:-$BYELLOW}"
+        len=${#text}
+        left=$(( (BOX_WIDTH - 2 - len) / 2 ))
+        right=$((BOX_WIDTH - 2 - len - left))
+        printf '%b║%b%b%*s%s%*s%b%b║%b\n' \
+                "$BCYAN" "$RESET" \
+                "$color$BOLD" "$left" '' "$text" "$right" '' \
+                "$RESET" "$BCYAN" "$RESET"
+}
+
+# Helper: tag list row (wraps long lists across multiple lines)
+_info_tags() {
+        key="$1"; tags="$2"; kc="${3:-$CYAN}"; vc="${4:-$DIM$WHITE}"
+        # Cannot use pipe+while because subshell loses variable state.
+        # Use a temp file as line-counter instead.
+        _tmp_tag="/tmp/esim_tag_first.$$"
+        printf '1' > "$_tmp_tag"
+        printf '%s' "$tags" | tr ',' '\n' | while read -r tag; do
+                tag="$(printf '%s' "$tag" | sed 's/^ *//;s/ *$//')"
+                [ -z "$tag" ] && continue
+                if [ "$(cat "$_tmp_tag")" = "1" ]; then
+                        printf '%b║%b %b%s%b %b│%b %b%s%b %b║%b\n' \
+                                "$BCYAN" "$RESET" \
+                                "$kc$BOLD" "$(pad_right "$key" 22)" "$RESET" \
+                                "$BCYAN" "$RESET" "$vc" "$(pad_right "$tag" 36)" "$RESET" \
+                                "$BCYAN" "$RESET"
+                        printf '0' > "$_tmp_tag"
+                else
+                        printf '%b║%b %b%s%b %b│%b %b%s%b %b║%b\n' \
+                                "$BCYAN" "$RESET" \
+                                "$DIM" "$(pad_right "" 22)" "$RESET" \
+                                "$BCYAN" "$RESET" "$vc" "$(pad_right "- $tag" 36)" "$RESET" \
+                                "$BCYAN" "$RESET"
+                fi
+        done
+        rm -f "$_tmp_tag"
+}
+
+show_info() {
+        json="$(run_lpac_capture chip info)"
+        printf '\n'
+        json="$(extract_lpa_json "$json")"
+
+        # Extract all fields via jq into tab-separated lines
+        fields="$(printf '%s\n' "$json" | jq -r '
+                select(type=="object" and .type=="lpa") |
+                .payload as $p |
+                $p.data as $d |
+                $d.EUICCInfo2 as $e |
+                [
+                        ($p.code | tostring),
+                        ($p.message // "-"),
+                        ($d.eidValue // "-"),
+                        ($d.EuiccConfiguredAddresses.defaultDpAddress // "- (not set)"),
+                        ($d.EuiccConfiguredAddresses.rootDsAddress // "-"),
+                        ($e.euiccFirmwareVer // "-"),
+                        ($e.profileVersion // "-"),
+                        ($e.svn // "-"),
+                        ($e.ts102241Version // "-"),
+                        ($e.globalplatformVersion // "-"),
+                        ($e.ppVersion // "-"),
+                        ($e.sasAcreditationNumber // "-"),
+                        (($e.extCardResource.installedApplication // 0) | tostring),
+                        (($e.extCardResource.freeNonVolatileMemory // 0) | tostring),
+                        (($e.extCardResource.freeVolatileMemory // 0) | tostring),
+                        ($e.uiccCapability // [] | join(",")),
+                        ($e.rspCapability // [] | join(",")),
+                        ($e.euiccCiPKIdListForVerification // [] | join(",")),
+                        ($e.euiccCiPKIdListForSigning // [] | join(",")),
+                        ($e.forbiddenProfilePolicyRules // [] | join(","))
+                ] | @tsv' 2>/dev/null)"
+
+        if [ -z "$fields" ]; then
+                printf '%b  ✘  Gagal membaca chip info. Pastikan lpac berjalan normal.%b\n' "$BRED$BOLD" "$RESET"
+                show_raw_if_debug "$json"
+                return
+        fi
+
+        code="$(     printf '%s' "$fields" | cut -f1)"
+        msg="$(      printf '%s' "$fields" | cut -f2)"
+        eid="$(      printf '%s' "$fields" | cut -f3)"
+        dp_addr="$(  printf '%s' "$fields" | cut -f4)"
+        ds_addr="$(  printf '%s' "$fields" | cut -f5)"
+        fw_ver="$(   printf '%s' "$fields" | cut -f6)"
+        prof_ver="$( printf '%s' "$fields" | cut -f7)"
+        svn="$(      printf '%s' "$fields" | cut -f8)"
+        ts102="$(    printf '%s' "$fields" | cut -f9)"
+        gp_ver="$(   printf '%s' "$fields" | cut -f10)"
+        pp_ver="$(   printf '%s' "$fields" | cut -f11)"
+        sas_no="$(   printf '%s' "$fields" | cut -f12)"
+        inst_app="$( printf '%s' "$fields" | cut -f13)"
+        free_nvm="$( printf '%s' "$fields" | cut -f14)"
+        free_ram="$( printf '%s' "$fields" | cut -f15)"
+        uicc_cap="$( printf '%s' "$fields" | cut -f16)"
+        rsp_cap="$(  printf '%s' "$fields" | cut -f17)"
+        ci_verify="$(printf '%s' "$fields" | cut -f18)"
+        ci_sign="$(  printf '%s' "$fields" | cut -f19)"
+        ppr_forbid="$(printf '%s' "$fields" | cut -f20)"
+
+        # Compute NVM percentage label
+        # freeNonVolatileMemory of L850GL is typically out of ~1MB (1048576)
+        nvm_total=1048576
+        nvm_pct=$(( free_nvm * 100 / nvm_total ))
+        nvm_label="${free_nvm} bytes  (~${nvm_pct}% free of ~1MB)"
+        ram_kb=$(( free_ram / 1024 ))
+        ram_label="${free_ram} bytes  (~${ram_kb} KB)"
+
+        # ── Draw box ──────────────────────────────────────────────────────────
+        printf '%b╔%s╗%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+        _info_title "  eUICC / EID  INFO  " "$BCYAN"
+        box_center "L850GL  eSIM Manager" "$DIM$ITALIC" "$BCYAN"
+        printf '%b╠%s╣%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+
+        # Status
+        if [ "$code" = "0" ]; then
+                _info_kv "Status" "OK - $msg" "$CYAN" "$BGREEN"
+        else
+                _info_kv "Status" "FAIL - $msg  (code: $code)" "$CYAN" "$BRED"
+        fi
+        _info_sep
+
+        # EID
+        _info_kv "EID" "$eid" "$BYELLOW" "$BYELLOW"
+        _info_sep
+
+        # Addresses
+        _info_title "-- Server Addresses --" "$BBLUE"
+        _info_kv "Default SM-DP+" "$dp_addr" "$CYAN" "$WHITE"
+        _info_kv "Root SM-DS"     "$ds_addr" "$CYAN" "$WHITE"
+        _info_sep
+
+        # Firmware & versions
+        _info_title "-- Firmware & Versions --" "$BBLUE"
+        _info_kv "eUICC Firmware"    "$fw_ver"   "$CYAN" "$BGREEN"
+        _info_kv "Profile Version"   "$prof_ver" "$CYAN" "$WHITE"
+        _info_kv "SVN"               "$svn"      "$CYAN" "$WHITE"
+        _info_kv "TS.102.241 Ver"    "$ts102"    "$CYAN" "$WHITE"
+        _info_kv "GlobalPlatform Ver" "$gp_ver"  "$CYAN" "$WHITE"
+        _info_kv "PP Version"        "$pp_ver"   "$CYAN" "$WHITE"
+        _info_kv "SAS Accreditation" "$sas_no"   "$CYAN" "$BMAGENTA"
+        _info_sep
+
+        # Memory
+        _info_title "-- Memory --" "$BBLUE"
+        _info_kv "Installed Apps"  "$inst_app"  "$CYAN" "$WHITE"
+        _info_kv "Free NVM"        "$nvm_label" "$CYAN" "$BGREEN"
+        _info_kv "Free RAM"        "$ram_label" "$CYAN" "$BGREEN"
+        _info_sep
+
+        # Capabilities
+        _info_title "-- RSP Capabilities --" "$BBLUE"
+        _info_tags "RSP Cap" "$rsp_cap" "$CYAN" "$WHITE"
+        _info_sep
+
+        # PPR
+        if [ -n "$ppr_forbid" ] && [ "$ppr_forbid" != "-" ]; then
+                _info_title "-- Profile Policy Rules --" "$BBLUE"
+                _info_kv "Forbidden PPR" "$ppr_forbid" "$CYAN" "$BYELLOW"
+                _info_sep
+        fi
+
+        # CI Keys (truncated)
+        _info_title "-- GSMA CI Public Keys --" "$BBLUE"
+        ci_v_short="$(printf '%s' "$ci_verify" | cut -c1-37)..."
+        ci_s_short="$(printf '%s' "$ci_sign"   | cut -c1-37)..."
+        _info_kv "CI Verify" "$ci_v_short" "$CYAN" "$DIM$WHITE"
+        _info_kv "CI Sign"   "$ci_s_short" "$CYAN" "$DIM$WHITE"
+
+        printf '%b╚%s╝%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+
+        show_raw_if_debug "$json"
+}
+
+# ─── Requirements check ───────────────────────────────────────────────────────
+
+check_requirements() {
+        if ! command -v "$LPAC_BIN" >/dev/null 2>&1 && [ ! -x "$LPAC_BIN" ]; then
+                printf '%b  ✘  LPAC tidak ditemukan di %s%b\n' "$BRED$BOLD" "$LPAC_BIN" "$RESET" >&2
+                exit 1
+        fi
+        if ! has_jq; then
+                printf '%b  ✘  jq tidak ditemukan. Install: apk add jq%b\n' "$BRED$BOLD" "$RESET" >&2
+                exit 1
+        fi
+}
+
+# ─── Main menu ────────────────────────────────────────────────────────────────
+
+main_menu() {
+        clear_screen
+        while :; do
+                esim_main_banner
+                printf '%b╔%s╗%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_item "1" "INFO EID & eUICC" "$BOLD$BYELLOW" "$BCYAN" "$BCYAN"
+                box_item "2" "Profile List  ( Switch / Delete )" "$BOLD$BYELLOW" "$BMAGENTA" "$BCYAN"
+                box_item "3" "Download eSIM Profile" "$BOLD$BYELLOW" "$BGREEN" "$BCYAN"
+                box_item "4" "Process Pending Notification" "$BOLD$BYELLOW" "$BBLUE" "$BCYAN"
+                box_item "5" "LPAC Version" "$BOLD$BYELLOW" "$WHITE" "$BCYAN"
+                box_item "6" "Recovery SIM Missing" "$BOLD$BYELLOW" "$BRED" "$BCYAN"
+                box_item "7" "Klaim eSIM Trial HYFE (XL Prioritas)" "$BOLD$XL_GOLD" "$XL_GOLD" "$BCYAN"
+                box_item "8" "Telegram Bot Settings" "$BOLD$BYELLOW" "$BCYAN" "$BCYAN"
+                printf '%b╠%s╣%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_item "0" "Exit" "$BOLD$DIM" "$DIM" "$BCYAN"
+                printf '%b╚%s╝%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+
+                printf '\n%b  ➤  Pilih menu: %b' "$BCYAN$BOLD" "$RESET"
+                read -r choice
+
+                case "$choice" in
+                        1) show_info; pause ;;
+                        2) profile_menu ;;
+                        3) download_profile ;;
+                        4) process_notifications; pause ;;
+                        5)
+                                json="$(run_lpac_capture version)"
+                                show_lpac_summary "LPAC VERSION" "$json"
+                                pause ;;
+                        6) recover_sim_missing; pause ;;
+                        7) hyfe_main_menu ;;
+                        8) telegram_settings_menu ;;
+                        0|q|Q) printf '\n%b  Goodbye.%b\n\n' "$DIM$ITALIC" "$RESET"; exit 0 ;;
+                        *) printf '%b  Pilihan tidak dikenal.%b\n' "$BRED" "$RESET"; pause ;;
+                esac
+        done
+}
+
+# ─── HYFE menu wrapper ───────────────────────────────────────────────────────
+# Dipanggil dari main_menu opsi 7. Cek lib & dependency dulu, kalau OK
+# panggil hyfe_menu dispatcher dari src/lib/hyfe.sh.
+hyfe_main_menu() {
+        if ! command -v hyfe_menu >/dev/null 2>&1; then
+                clear_screen
+                printf '\n%b╔%s╗%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_center "HYFE library tidak ter-load" "$BOLD$BRED" "$BCYAN"
+                printf '%b╠%s╣%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_center "Pastikan paket esim ter-install lengkap" "$WHITE" "$BCYAN"
+                box_center "di /usr/lib/hyfetrial/{common,hyfe,...}.sh" "$DIM" "$BCYAN"
+                printf '%b╚%s╝%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                pause
+                return 1
+        fi
+        if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+                clear_screen
+                printf '\n%b╔%s╗%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_center "curl + jq dibutuhkan untuk menu HYFE" "$BOLD$BRED" "$BCYAN"
+                printf '%b╠%s╣%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                box_center "Install: opkg install curl jq" "$WHITE" "$BCYAN"
+                printf '%b╚%s╝%b\n' "$BCYAN" "$(repeat_char '═' $((BOX_WIDTH - 2)))" "$RESET"
+                pause
+                return 1
+        fi
+        hyfe_menu
+}
+
+# ─── Source HYFE libs ────────────────────────────────────────────────────────
+# Setelah semua helper UI esim didefinisikan. Lib akan pakai box_*, kv_row,
+# section_header, dll. Urutan source penting: common -> config -> api ->
+# captcha -> otp -> hyfe (last; depends on semuanya).
+if [ -f "$HYFE_LIB_DIR/common.sh" ]; then
+        # shellcheck source=src/lib/common.sh
+        . "$HYFE_LIB_DIR/common.sh"
+        # shellcheck source=src/lib/config.sh
+        [ -f "$HYFE_LIB_DIR/config.sh"  ] && . "$HYFE_LIB_DIR/config.sh"
+        # shellcheck source=src/lib/api.sh
+        [ -f "$HYFE_LIB_DIR/api.sh"     ] && . "$HYFE_LIB_DIR/api.sh"
+        # shellcheck source=src/lib/captcha.sh
+        [ -f "$HYFE_LIB_DIR/captcha.sh" ] && . "$HYFE_LIB_DIR/captcha.sh"
+        # shellcheck source=src/lib/otp.sh
+        [ -f "$HYFE_LIB_DIR/otp.sh"     ] && . "$HYFE_LIB_DIR/otp.sh"
+        # shellcheck source=src/lib/hyfe.sh
+        [ -f "$HYFE_LIB_DIR/hyfe.sh"    ] && . "$HYFE_LIB_DIR/hyfe.sh"
+fi
+
+case "${1:-}" in
+        --telegram-quota)
+                if ! has_jq; then
+                        printf 'jq tidak ditemukan. Install: opkg install jq\n' >&2
+                        exit 1
+                fi
+                if ! command -v curl >/dev/null 2>&1; then
+                        printf 'curl tidak ditemukan. Install: opkg install curl\n' >&2
+                        exit 1
+                fi
+                telegram_quota_msisdn "${2:-}"
+                exit $? ;;
+esac
+
+check_requirements
+main_menu
