@@ -42,6 +42,7 @@ set_lpac_option at_device '/dev/ttyUSB2'
 set_lpac_option mbim_device '/dev/cdc-wdm0'
 set_lpac_option mbim_proxy '1'
 set_lpac_option mbim_skip_slot_mapping '1'
+set_lpac_option mbim_uim_slot '2'
 set_lpac_option custom_isd_r_aid 'A0000005591010FFFFFFFF8900000100'
 set_lpac_option reboot_method 'script'
 set_lpac_option modem_iface '1_1'
@@ -64,6 +65,7 @@ uci -q get lpac.mbim >/dev/null 2>&1 || uci -q set lpac.mbim='mbim'
 uci -q set lpac.mbim.device='/dev/cdc-wdm0'
 uci -q set lpac.mbim.proxy='1'
 uci -q set lpac.mbim.skip_slot_mapping='1'
+uci -q set lpac.mbim.uim_slot='2'
 uci -q get lpac.uqmi >/dev/null 2>&1 || uci -q set lpac.uqmi='uqmi'
 uci -q set lpac.uqmi.device='/dev/cdc-wdm0'
 uci -q set lpac.uqmi.debug='0'
@@ -77,7 +79,7 @@ else
 	log "WARNING: /usr/libexec/mbim-proxy missing; libmbim must be installed for safe LPAC MBIM access"
 fi
 
-log "LPAC defaults set: backend=mbim device=/dev/cdc-wdm0 proxy=1 skip_slot=1 at=/dev/ttyUSB2 iface=1_1"
+log "LPAC defaults set: backend=mbim device=/dev/cdc-wdm0 proxy=1 skip_slot=1 uim_slot=2 at=/dev/ttyUSB2 iface=1_1"
 
 if [ -x /etc/init.d/esim-telegram-bot ]; then
 	/etc/init.d/esim-telegram-bot enable >/dev/null 2>&1 || true

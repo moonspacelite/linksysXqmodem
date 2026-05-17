@@ -145,12 +145,18 @@ configure_lpac_transport() {
         _backend="$(uci_get_lpac_esim apdu_backend)"
         _http="$(uci_get_lpac_esim http_backend)"
         _mbim_device="$(uci_get_lpac_esim mbim_device)"
+        _mbim_uim_slot="$(uci_get_lpac_esim mbim_uim_slot)"
         _at_device="$(uci_get_lpac_esim at_device)"
         _isd_r="$(uci_get_lpac_esim custom_isd_r_aid)"
 
         [ -n "$_backend" ] || _backend="mbim"
         [ -n "$_http" ] || _http="curl"
         [ -n "$_mbim_device" ] || _mbim_device="/dev/cdc-wdm0"
+        [ -n "$_mbim_uim_slot" ] || _mbim_uim_slot="2"
+        case "$_mbim_uim_slot" in
+                1|2) ;;
+                *) _mbim_uim_slot="2" ;;
+        esac
         [ -n "$_at_device" ] || _at_device="/dev/ttyUSB2"
         [ -n "$_isd_r" ] || _isd_r="A0000005591010FFFFFFFF8900000100"
 
@@ -166,6 +172,7 @@ configure_lpac_transport() {
                 export LPAC_APDU_MBIM_DEVICE="$_mbim_device"
                 export LPAC_APDU_MBIM_USE_PROXY=1
                 export LPAC_APDU_MBIM_SKIP_SLOT_MAPPING=1
+                export LPAC_APDU_MBIM_UIM_SLOT="$_mbim_uim_slot"
                 export LIBMBIM_USE_PROXY=1
                 export MBIM_USE_PROXY=1
         elif [ "$_backend" = "at" ]; then

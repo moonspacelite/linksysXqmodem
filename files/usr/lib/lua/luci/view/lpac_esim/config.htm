@@ -73,7 +73,17 @@
                         <option value="0"><%:Disabled%></option>
                         <option value="1"><%:Enabled%></option>
                     </select>
-                    <div class="cbi-value-description"><%:Enable for L850GL. Skips MBIM slot mapping that causes OperationNotAllowed error.%></div>
+                    <div class="cbi-value-description"><%:Keep enabled for T99W175/L850GL style modules that reject MBIM slot mapping.%></div>
+                </div>
+            </div>
+            <div class="cbi-value" id="cfg-mbim-uim-slot-row" style="display: none;">
+                <label class="cbi-value-title"><%:MBIM UIM Slot%></label>
+                <div class="cbi-value-field">
+                    <select id="cfg-mbim-uim-slot" class="cbi-input-select" title="LPAC MBIM UIM slot. LPAC/libmbim numbering is 1-based; T99W175 internal eSIM is normally slot 2.">
+                        <option value="1"><%:Slot 1%></option>
+                        <option value="2"><%:Slot 2 (internal eSIM)%></option>
+                    </select>
+                    <div class="cbi-value-description"><%:Use slot 2 for the T99W175 internal eSIM. This matches AT^SWITCH_SLOT=1 / SIM2 eSIM.%></div>
                 </div>
             </div>
             <div class="cbi-value" id="cfg-custom-isd-r-aid-row">

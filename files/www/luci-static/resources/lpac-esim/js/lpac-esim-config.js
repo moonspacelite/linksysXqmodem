@@ -36,6 +36,7 @@ function populateConfig(cfg) {
     setVal('cfg-mbim-device',   cfg.mbim_device   || '/dev/cdc-wdm0');
     setVal('cfg-mbim-proxy',    cfg.mbim_proxy    || '1');
     setVal('cfg-mbim-skip-slot', cfg.mbim_skip_slot_mapping || '1');
+    setVal('cfg-mbim-uim-slot', cfg.mbim_uim_slot || '2');
     setVal('cfg-custom-isd-r-aid', cfg.custom_isd_r_aid || 'A0000005591010FFFFFFFF8900000100');
     setVal('cfg-reboot-method', cfg.reboot_method || 'script');
     setVal('cfg-modem-iface',   cfg.modem_iface   || '1_1');
@@ -59,7 +60,7 @@ function onBackendChange() {
 
     // Show/hide device rows based on backend
     var qmiRows  = ['cfg-qmi-device-row'];
-    var mbimRows = ['cfg-mbim-device-row', 'cfg-mbim-proxy-row', 'cfg-mbim-skip-slot-row'];
+    var mbimRows = ['cfg-mbim-device-row', 'cfg-mbim-proxy-row', 'cfg-mbim-skip-slot-row', 'cfg-mbim-uim-slot-row'];
 
     qmiRows.forEach(function(id) {
         var el = document.getElementById(id);
@@ -86,6 +87,7 @@ function saveConfig() {
         mbim_device:   getVal('cfg-mbim-device'),
         mbim_proxy:    getVal('cfg-mbim-proxy'),
         mbim_skip_slot_mapping: getVal('cfg-mbim-skip-slot'),
+        mbim_uim_slot: getVal('cfg-mbim-uim-slot'),
         custom_isd_r_aid: getVal('cfg-custom-isd-r-aid'),
         reboot_method: getVal('cfg-reboot-method'),
         modem_iface:   getVal('cfg-modem-iface'),

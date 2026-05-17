@@ -109,6 +109,7 @@ local function read_config()
     config.mbim_device   = config.mbim_device   or "/dev/cdc-wdm0"
     config.mbim_proxy    = config.mbim_proxy    or "1"
     config.mbim_skip_slot_mapping = config.mbim_skip_slot_mapping or "1"
+    config.mbim_uim_slot = config.mbim_uim_slot or "2"
     config.custom_isd_r_aid = config.custom_isd_r_aid or "A0000005591010FFFFFFFF8900000100"
     config.reboot_method = config.reboot_method or "script"
     config.modem_iface   = config.modem_iface   or "1_1"
@@ -178,6 +179,9 @@ function exec_script(cmd, timeout, silent)
         end
         if config.mbim_skip_slot_mapping == "1" then
             flags = flags .. " --mbim-skip-slot"
+        end
+        if config.mbim_uim_slot ~= "" then
+            flags = flags .. " --mbim-uim-slot " .. util.shellquote(config.mbim_uim_slot)
         end
     else
         flags = flags .. " --device " .. util.shellquote(config.qmi_device)
@@ -304,13 +308,13 @@ end
 -- Differences: command name and timeout.
 
 function api_profiles()
-    local raw  = exec_script("profiles", 20, true)
+    local raw  = exec_script("profiles", 35, true)
     local data = parse_lpac_json(raw)
     send_json(data or make_error("parse_error", "Empty or invalid response from backend"))
 end
 
 function api_chip()
-    local raw  = exec_script("chip", 10, true)
+    local raw  = exec_script("chip", 30, true)
     local data = parse_lpac_json(raw)
     send_json(data or make_error("parse_error", "Empty or invalid response from backend"))
 end
@@ -322,7 +326,7 @@ function api_modem_status()
 end
 
 function api_notif_list()
-    local raw  = exec_script("notif-list", 15, true)
+    local raw  = exec_script("notif-list", 30, true)
     local data = parse_lpac_json(raw)
     send_json(data or make_error("parse_error", "Empty or invalid response from backend"))
 end
@@ -611,7 +615,7 @@ function api_save_config()
         "apdu_backend",
         "qmi_device", "qmi_sim_slot", "sim_slot",
         "at_device",
-        "mbim_device", "mbim_proxy", "mbim_skip_slot_mapping",
+        "mbim_device", "mbim_proxy", "mbim_skip_slot_mapping", "mbim_uim_slot",
         "custom_isd_r_aid",
         "reboot_method", "modem_iface",
         "apdu_debug", "http_debug", "at_debug"
@@ -641,6 +645,9 @@ function api_save_config()
     end
     if sanitized.sim_slot and not valid_sim_slots[sanitized.sim_slot] then
         return send_json(make_error("invalid_config", "Invalid SIM slot. Use: 0 or 1"))
+    end
+    if sanitized.mbim_uim_slot and not valid_slots[sanitized.mbim_uim_slot] then
+        return send_json(make_error("invalid_config", "Invalid MBIM UIM slot. Use: 1 or 2"))
     end
     local valid_flags = { ["0"] = true, ["1"] = true }
     for _, fkey in ipairs({"apdu_debug", "http_debug", "at_debug", "mbim_proxy", "mbim_skip_slot_mapping"}) do

@@ -213,7 +213,12 @@ document.addEventListener('DOMContentLoaded', function() {
         if (data && data.payload && data.payload.data) {
             var v = data.payload.data;
             var el = document.getElementById('esim-app-version');
-            if (el) el.textContent = 'v' + (v.script_version || '?') + ' / lpac ' + (v.lpac_version || '?') + ' / ' + (v.backend || '?').toUpperCase();
+            var parts = ['v' + (v.script_version || '?'), 'lpac ' + (v.lpac_version || '?'), (v.backend || '?').toUpperCase()];
+            if (v.backend === 'mbim') {
+                parts.push('proxy ' + (v.mbim_proxy_config === '1' ? 'on' : 'off'));
+                parts.push('uim ' + (v.mbim_uim_slot || 'auto'));
+            }
+            if (el) el.textContent = parts.join(' / ');
         }
     }).catch(function() {});
     /* Activate first tab — triggers lazy load for Info only */

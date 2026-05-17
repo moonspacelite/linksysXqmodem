@@ -489,7 +489,7 @@ jobs:
             echo "Target: Linksys EA6350v3 / ${OPENWRT_TARGET_PATH} / ${OPENWRT_ARCH_LABEL}"
             echo "Builder: OpenWrt SDK + ImageBuilder"
             echo "eSIM stack: lpac, luci-app-lpac-manager, 0xygen-aio, Telegram bot, HYFE IMAP helpers, Ookla speedtest"
-            echo "LPAC defaults: MBIM /dev/cdc-wdm0, mbim-proxy=1, mbim-skip-slot=1, AT /dev/ttyUSB2, modem_iface=1_1"
+            echo "LPAC defaults: MBIM /dev/cdc-wdm0, mbim-proxy=1, mbim-skip-slot=1, mbim-uim-slot=2, AT /dev/ttyUSB2, modem_iface=1_1"
             echo "ModemManager: excluded; QModem owns MBIM /dev/cdc-wdm0 and wwan0"
           } > firmware/build-info.txt
 
