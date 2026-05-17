@@ -391,6 +391,7 @@ jobs:
           find files/etc/uci-defaults -type f -exec chmod 0755 {} \; 2>/dev/null || true
           find files/etc/init.d -type f -exec chmod 0755 {} \; 2>/dev/null || true
           find files/usr/bin -maxdepth 1 -type f -exec chmod 0755 {} \; 2>/dev/null || true
+          find files/usr/sbin -maxdepth 1 -type f -exec chmod 0755 {} \; 2>/dev/null || true
 
           if [[ -f ../../src/esim-telegram-bot.c ]]; then
             mkdir -p files/usr/bin

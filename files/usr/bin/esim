@@ -9,7 +9,9 @@ if command -v uci >/dev/null 2>&1; then
         [ -n "$_uci_iface" ] && NETIFD_IFACE="$_uci_iface"
 fi
 NETIFD_IFACE="${NETIFD_IFACE:-modem}"
+TMP_DIR="/tmp/lpac-esim"
 LOCK_FILE="/tmp/lpac-esim/lpac.lock"
+ACTIVE_FILE="/tmp/lpac-esim/lpac.active"
 UCI_CONFIG="lpac-esim"
 UCI_SECTION="main"
 
@@ -131,6 +133,18 @@ check_luci_lock() {
         return 0
 }
 
+mark_lpac_active() {
+        mkdir -p "$TMP_DIR" >/dev/null 2>&1
+        printf '%s\n' "$$" > "$ACTIVE_FILE"
+}
+
+clear_lpac_active() {
+        _pid="$(cat "$ACTIVE_FILE" 2>/dev/null)"
+        if [ -z "$_pid" ] || [ "$_pid" = "$$" ] || ! kill -0 "$_pid" 2>/dev/null; then
+                rm -f "$ACTIVE_FILE" 2>/dev/null
+        fi
+}
+
 pause() {
         printf '\n%b  Tekan Enter untuk lanjut... %b' "$DIM$ITALIC" "$RESET"
         read -r _
@@ -184,7 +198,11 @@ configure_lpac_transport() {
 
 run_lpac() {
         configure_lpac_transport || return 1
+        mark_lpac_active
         "$LPAC_BIN" "$@"
+        _ret=$?
+        clear_lpac_active
+        return "$_ret"
 }
 
 repeat_char() {

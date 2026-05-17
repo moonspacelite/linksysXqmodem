@@ -1,0 +1,78 @@
+#!/bin/sh
+# QModem-safe lpac shim.
+#
+# Root's PATH on OpenWrt normally finds /usr/sbin before /usr/bin, so manual
+# commands such as `lpac chip info` pass through this wrapper. The actual lpac
+# binary remains /usr/bin/lpac.
+
+REAL_LPAC="${LPAC_REAL_BIN:-/usr/bin/lpac}"
+APP_NAME="lpac-esim"
+TMP_DIR="/tmp/${APP_NAME}"
+ACTIVE_FILE="${TMP_DIR}/lpac.active"
+
+[ -x "$REAL_LPAC" ] || {
+    printf '%s\n' "ERROR: real lpac binary not found at $REAL_LPAC" >&2
+    exit 127
+}
+
+uci_get() {
+    uci -q get "lpac-esim.main.$1" 2>/dev/null
+}
+
+mark_active() {
+    mkdir -p "$TMP_DIR" >/dev/null 2>&1
+    printf '%s\n' "$$" > "$ACTIVE_FILE"
+}
+
+clear_active() {
+    pid="$(cat "$ACTIVE_FILE" 2>/dev/null)"
+    if [ -z "$pid" ] || [ "$pid" = "$$" ] || ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$ACTIVE_FILE" 2>/dev/null
+    fi
+}
+
+backend="$(uci_get apdu_backend)"
+http_backend="$(uci_get http_backend)"
+mbim_device="$(uci_get mbim_device)"
+mbim_proxy="$(uci_get mbim_proxy)"
+mbim_skip_slot="$(uci_get mbim_skip_slot_mapping)"
+mbim_uim_slot="$(uci_get mbim_uim_slot)"
+at_device="$(uci_get at_device)"
+isd_r="$(uci_get custom_isd_r_aid)"
+
+[ -n "$backend" ] || backend="mbim"
+[ -n "$http_backend" ] || http_backend="curl"
+[ -n "$mbim_device" ] || mbim_device="/dev/cdc-wdm0"
+[ -n "$mbim_proxy" ] || mbim_proxy="1"
+[ -n "$mbim_skip_slot" ] || mbim_skip_slot="1"
+[ -n "$mbim_uim_slot" ] || mbim_uim_slot="2"
+[ -n "$at_device" ] || at_device="/dev/ttyUSB2"
+[ -n "$isd_r" ] || isd_r="A0000005591010FFFFFFFF8900000100"
+
+export LPAC_APDU="$backend"
+export LPAC_HTTP="$http_backend"
+export LPAC_CUSTOM_ISD_R_AID="$isd_r"
+
+case "$backend" in
+    mbim)
+        export LPAC_APDU_MBIM_DEVICE="$mbim_device"
+        if [ "$mbim_proxy" = "1" ]; then
+            export LPAC_APDU_MBIM_USE_PROXY=1
+            export LIBMBIM_USE_PROXY=1
+            export MBIM_USE_PROXY=1
+        fi
+        [ "$mbim_skip_slot" = "1" ] && export LPAC_APDU_MBIM_SKIP_SLOT_MAPPING=1
+        case "$mbim_uim_slot" in
+            1|2) export LPAC_APDU_MBIM_UIM_SLOT="$mbim_uim_slot" ;;
+        esac
+        ;;
+    at)
+        export LPAC_APDU_AT_DEVICE="$at_device"
+        ;;
+esac
+
+mark_active
+"$REAL_LPAC" "$@"
+ret=$?
+clear_active
+exit "$ret"

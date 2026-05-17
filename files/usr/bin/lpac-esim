@@ -59,6 +59,7 @@ TIMEOUT_BIN=""
 TMP_DIR="/tmp/${APP_NAME}"
 LOG_FILE="${TMP_DIR}/run.log"
 LOCK_FILE="${TMP_DIR}/lpac.lock"
+ACTIVE_FILE="${TMP_DIR}/lpac.active"
 RESULT_FILE="${TMP_DIR}/last_result.json"
 SELECTED_TARGET=""
 
@@ -163,6 +164,13 @@ parse_args() {
 
 check_cmd() { command -v "$1" 2>/dev/null; }
 
+find_lpac_bin() {
+    for _lpac in /usr/bin/lpac.real /usr/libexec/lpac /usr/bin/lpac; do
+        [ -x "$_lpac" ] && { printf '%s\n' "$_lpac"; return 0; }
+    done
+    check_cmd lpac
+}
+
 load_uci_config() {
     command -v uci >/dev/null 2>&1 || return 0
     _v="$(uci -q get lpac-esim.main.apdu_backend 2>/dev/null)"; [ -n "$_v" ] && BACKEND="$_v"
@@ -181,7 +189,7 @@ load_uci_config() {
 # Silent runtime init — sets tool paths only, no logging output.
 # Called on EVERY API request to ensure JQ_BIN etc are always set.
 init_tools_runtime() {
-    LPAC_BIN="$(check_cmd lpac)"
+    LPAC_BIN="$(find_lpac_bin)"
     JQ_BIN="$(check_cmd jq)"
     QMICLI_BIN="$(check_cmd qmicli)"
     MBIMCLI_BIN="$(check_cmd mbimcli)"
@@ -191,7 +199,7 @@ init_tools_runtime() {
 
 check_required_tools() {
     step "Checking required tools..."
-    LPAC_BIN="$(check_cmd lpac)"; [ -n "$LPAC_BIN" ] && ok "lpac found: $LPAC_BIN" || die "lpac not found in PATH"
+    LPAC_BIN="$(find_lpac_bin)"; [ -n "$LPAC_BIN" ] && ok "lpac found: $LPAC_BIN" || die "lpac not found in PATH"
     JQ_BIN="$(check_cmd jq)";       [ -n "$JQ_BIN" ]      && ok "jq found: $JQ_BIN"       || die "jq not found in PATH"
     QMICLI_BIN="$(check_cmd qmicli)"; [ -n "$QMICLI_BIN" ] && ok "qmicli found: $QMICLI_BIN" || warn "qmicli not found"
     MBIMCLI_BIN="$(check_cmd mbimcli)"; [ -n "$MBIMCLI_BIN" ] && ok "mbimcli found: $MBIMCLI_BIN" || warn "mbimcli not found"
@@ -340,6 +348,18 @@ recover_qmodem_if_needed() {
     [ -x /etc/init.d/qmodem_network ] && /etc/init.d/qmodem_network start >/dev/null 2>&1 || true
 }
 
+mark_lpac_active() {
+    mkdir -p "$TMP_DIR" >/dev/null 2>&1
+    printf '%s\n' "$$" > "$ACTIVE_FILE"
+}
+
+clear_lpac_active() {
+    _pid="$(cat "$ACTIVE_FILE" 2>/dev/null)"
+    if [ -z "$_pid" ] || [ "$_pid" = "$$" ] || ! kill -0 "$_pid" 2>/dev/null; then
+        rm -f "$ACTIVE_FILE" 2>/dev/null
+    fi
+}
+
 run_lpac_json_to_file() {
     action="$1"; out="$2"; t_sec="${3:-15}"
     if ! prepare_lpac_transport; then
@@ -348,18 +368,21 @@ run_lpac_json_to_file() {
     fi
     envs="$(build_lpac_env)"; cmd="$envs $LPAC_BIN $action"
     log_verbose "Executing (Timeout ${t_sec}s): $cmd"
-    if run_with_timeout "$t_sec" sh -c "$cmd > \"$out\" 2>>\"$LOG_FILE\""; then return 0
-    else
-        ret=$?
-        if [ "$ret" = "124" ]; then
-            syslog_msg "TIMEOUT: lpac $action timed out after ${t_sec}s"
-            warn "Command TIMED OUT after ${t_sec}s! Modem might be locked."
-        else
-            syslog_msg "FAIL: lpac $action exited with code $ret"
-            log_verbose "Command failed with code $ret"
-        fi
-        return $ret
+    mark_lpac_active
+    run_with_timeout "$t_sec" sh -c "$cmd > \"$out\" 2>>\"$LOG_FILE\""
+    ret=$?
+    clear_lpac_active
+    if [ "$ret" = "0" ]; then
+        return 0
     fi
+    if [ "$ret" = "124" ]; then
+        syslog_msg "TIMEOUT: lpac $action timed out after ${t_sec}s"
+        warn "Command TIMED OUT after ${t_sec}s! Modem might be locked."
+    else
+        syslog_msg "FAIL: lpac $action exited with code $ret"
+        log_verbose "Command failed with code $ret"
+    fi
+    return "$ret"
 }
 
 run_lpac_readonly_json_to_file() {

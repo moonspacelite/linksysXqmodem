@@ -46,6 +46,108 @@ index 0c9e446..de75298 100755
 @@ -348 +348 @@ match_config()
 -    [[ "$name" = *"mv31-w"* ]] || [[ "$name" = *"T99W175"* ]] && name="t99w175"
 +    [[ "$name" = *"mv31-w"* ]] || [[ "$name" = *"t99w175"* ]] && name="t99w175"
+diff --git a/application/qmodem/files/usr/share/qmodem/modem_dial.sh b/application/qmodem/files/usr/share/qmodem/modem_dial.sh
+index 4bfee27..47b6dd8 100755
+--- a/application/qmodem/files/usr/share/qmodem/modem_dial.sh
++++ b/application/qmodem/files/usr/share/qmodem/modem_dial.sh
+@@ -11,0 +12,86 @@ source "${SCRIPT_DIR}/generic.sh"
++LPAC_ACTIVE_FILE="/tmp/lpac-esim/lpac.active"
++
++lpac_esim_active()
++{
++    [ -f "$LPAC_ACTIVE_FILE" ] || return 1
++    local lpac_pid
++    lpac_pid=$(cat "$LPAC_ACTIVE_FILE" 2>/dev/null)
++    [ -n "$lpac_pid" ] && kill -0 "$lpac_pid" 2>/dev/null && return 0
++    rm -f "$LPAC_ACTIVE_FILE" 2>/dev/null
++    return 1
++}
++
++qmodem_mbim_port()
++{
++    local wdm
++    wdm=$(find "$modem_path" -name 'cdc-wdm*' 2>/dev/null | head -n 1)
++    [ -n "$wdm" ] && printf '/dev/%s\n' "$(basename "$wdm")"
++}
++
++qmodem_mbim_ip_type()
++{
++    case "$(echo "$pdp_type" | tr 'A-Z' 'a-z')" in
++        ip|ipv4) printf 'ipv4\n' ;;
++        ipv6) printf 'ipv6\n' ;;
++        *) printf 'ipv4v6\n' ;;
++    esac
++}
++
++qmodem_mbim_write_profile()
++{
++    local profile="$1"
++    local auth_upper
++    auth_upper="$(echo "$auth" | tr 'a-z' 'A-Z')"
++    {
++        printf 'APN=%s\n' "${apn:-auto}"
++        [ -n "$username" ] && printf 'APN_USER=%s\n' "$username"
++        [ -n "$password" ] && printf 'APN_PASS=%s\n' "$password"
++        case "$auth_upper" in
++            PAP|CHAP|MSCHAPV2) printf 'APN_AUTH=%s\n' "$auth_upper" ;;
++        esac
++        printf 'IP_TYPE=%s\n' "$(qmodem_mbim_ip_type)"
++        printf 'PROXY=yes\n'
++    } > "$profile"
++}
++
++qmodem_mbim_network_dial()
++{
++    local mbim_port profile carrier
++    mbim_port="$(qmodem_mbim_port)"
++    [ -n "$mbim_port" ] || return 1
++    command -v mbim-network >/dev/null 2>&1 || return 1
++
++    profile="${MODEM_RUNDIR}/${modem_config}_dir/mbim-network.conf"
++    qmodem_mbim_write_profile "$profile"
++    echo "$$" > "${MODEM_RUNDIR}/${modem_config}_dir/$modem_config.pid"
++    trap 'mbim-network --profile="$profile" "$mbim_port" stop >>"$log_file" 2>&1; exit 0' INT TERM
++
++    while true; do
++        if lpac_esim_active; then
++            m_debug "LPAC eUICC access is active; pause MBIM connect"
++            sleep 5
++            continue
++        fi
++
++        m_debug "dialing: mbim-network --profile=$profile $mbim_port start"
++        mbim-network --profile="$profile" "$mbim_port" start >>"$log_file" 2>&1
++        if [ "$?" = "0" ]; then
++            ifup ${interface_name}
++            ifup ${interface6_name}
++            while true; do
++                sleep 15
++                if lpac_esim_active; then
++                    m_debug "LPAC eUICC access is active; pause MBIM monitor"
++                    continue
++                fi
++                carrier=$(cat "/sys/class/net/${modem_netcard}/carrier" 2>/dev/null)
++                [ "$carrier" = "1" ] && continue
++                m_debug "MBIM carrier is down; reconnecting via mbim-network"
++                break
++            done
++        else
++            m_debug "mbim-network start failed; retrying"
++            sleep 5
++        fi
++    done
++}
+@@ -974,0 +1061,4 @@ mbim_dial(){
++    if [ "$manufacturer" = "foxconn" ]; then
++        qmodem_mbim_network_dial && return 0
++        m_debug "mbim-network unavailable for Foxconn; falling back to legacy qmi_dial"
++    fi
+@@ -1496,0 +1587,5 @@ at_dial_monitor()
++        if lpac_esim_active; then
++            m_debug "LPAC eUICC access is active; pause QModem monitor"
++            sleep 5
++            continue
++        fi
 diff --git a/application/qmodem/files/usr/share/qmodem/vendor/foxconn.sh b/application/qmodem/files/usr/share/qmodem/vendor/foxconn.sh
 index 146cb20..f812a0a 100644
 --- a/application/qmodem/files/usr/share/qmodem/vendor/foxconn.sh
