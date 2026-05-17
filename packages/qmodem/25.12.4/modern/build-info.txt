@@ -1,0 +1,5 @@
+OpenWrt version: 25.12.4
+QModem ref: main
+QModem UI: modern
+Target: Linksys EA6350v3 / ipq40xx/generic / arm_cortex-a7_neon-vfpv4
+Built by: Build QModem Packages workflow
