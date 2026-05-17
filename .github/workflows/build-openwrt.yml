@@ -95,8 +95,9 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl file gawk gettext git \
-            libncurses-dev python3 python3-pyelftools rsync unzip wget zstd
+            bison build-essential ca-certificates curl file flex gawk gettext git \
+            libelf-dev libncurses-dev libssl-dev pkgconf python3 python3-pyelftools \
+            rsync unzip wget zlib1g-dev zstd
 
       - name: Download OpenWrt SDK and ImageBuilder
         shell: bash
@@ -121,8 +122,6 @@ jobs:
 
           printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git;%s\n' "${{ steps.inputs.outputs.qmodem_ref }}" >> feeds.conf.default
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          ./scripts/feeds install -a -f -p qmodem
 
           scan_script="feeds/qmodem/application/qmodem/files/usr/share/qmodem/modem_scan.sh"
           if [[ -f "$scan_script" ]]; then
@@ -141,13 +140,11 @@ jobs:
             echo "CONFIG_PACKAGE_luci-app-qmodem=m"
             echo "CONFIG_PACKAGE_luci-app-qmodem-sms=m"
             echo "CONFIG_PACKAGE_luci-app-qmodem-mwan=m"
-            echo "CONFIG_PACKAGE_luci-app-qmodem-ttl=m"
+            echo "CONFIG_PACKAGE_luci-app-qmodem-ttlfw4=m"
             echo "CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_ndisc6=y"
             echo "CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_generic-qmi-wwan=y"
             echo "CONFIG_PACKAGE_luci-app-qmodem_USE_TOM_CUSTOMIZED_QUECTEL_CM=y"
           } >> .config
-
-          make defconfig
 
           if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
             packages=(
@@ -170,9 +167,12 @@ jobs:
               luci-app-qmodem
               luci-app-qmodem-sms
               luci-app-qmodem-mwan
-              luci-app-qmodem-ttl
+              luci-app-qmodem-ttlfw4
             )
           fi
+
+          ./scripts/feeds install -f "${packages[@]}"
+          make defconfig V=s
 
           for pkg in "${packages[@]}"; do
             echo "Building ${pkg}"
@@ -199,7 +199,7 @@ jobs:
           if [[ "${{ inputs.qmodem_ui }}" == "modern" ]]; then
             qmodem_packages="qmodem luci-app-qmodem-next sms-forwarder-next quectel-CM-5G-M"
           else
-            qmodem_packages="qmodem luci-app-qmodem luci-app-qmodem-sms luci-app-qmodem-mwan luci-app-qmodem-ttl sms-forwarder quectel-CM-5G-M"
+            qmodem_packages="qmodem luci-app-qmodem luci-app-qmodem-sms luci-app-qmodem-mwan luci-app-qmodem-ttlfw4 sms-forwarder quectel-CM-5G-M"
           fi
 
           packages="luci ${qmodem_packages} kmod-usb-net-cdc-mbim kmod-usb-serial-option kmod-usb-serial-qualcomm usbutils picocom"
