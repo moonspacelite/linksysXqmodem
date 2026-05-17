@@ -287,9 +287,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! grep -q '^src-git 0xygen_aio ' feeds.conf.default; then
-            printf '\nsrc-git 0xygen_aio %s;%s\n' "$OXYGEN_AIO_FEED_URL" "$OXYGEN_AIO_REF" >> feeds.conf.default
-          fi
+          oxygen_feed="$GITHUB_WORKSPACE/build/oxygen-aio-feed"
+          rm -rf "$oxygen_feed"
+          git clone "$OXYGEN_AIO_FEED_URL" "$oxygen_feed"
+          git -C "$oxygen_feed" checkout --detach "$OXYGEN_AIO_REF"
+
+          sed -i '/^src-git 0xygen_aio /d;/^src-link 0xygen_aio /d' feeds.conf.default
+          printf '\nsrc-link 0xygen_aio %s\n' "$oxygen_feed" >> feeds.conf.default
           ./scripts/feeds update -a
 
           lpac_makefile="feeds/0xygen_aio/lpac/Makefile"
