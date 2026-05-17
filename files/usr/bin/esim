@@ -145,6 +145,31 @@ clear_lpac_active() {
         fi
 }
 
+lpac_readonly_action() {
+        case "$1 ${2:-}" in
+                "chip info"|"profile list"|"notification list") return 0 ;;
+        esac
+        return 1
+}
+
+iface_is_up() {
+        _status="$(ubus call "network.interface.${NETIFD_IFACE}" status 2>/dev/null || ifstatus "$NETIFD_IFACE" 2>/dev/null)"
+        printf '%s' "$_status" | grep -q '"up"[[:space:]]*:[[:space:]]*true'
+}
+
+recover_qmodem_if_needed() {
+        _was_up="$1"
+        _action="$2"
+
+        [ "$_was_up" = "1" ] || return 0
+        iface_is_up && return 0
+
+        logger -t esim "WARN: lpac ${_action} dropped ${NETIFD_IFACE}; asking QModem/netifd to reconnect" 2>/dev/null || true
+        ifup "$NETIFD_IFACE" >/dev/null 2>&1 || ubus call "network.interface.${NETIFD_IFACE}" up >/dev/null 2>&1 || true
+        ifup "${NETIFD_IFACE}v6" >/dev/null 2>&1 || ubus call "network.interface.${NETIFD_IFACE}v6" up >/dev/null 2>&1 || true
+        [ -x /etc/init.d/qmodem_network ] && /etc/init.d/qmodem_network start >/dev/null 2>&1 || true
+}
+
 pause() {
         printf '\n%b  Tekan Enter untuk lanjut... %b' "$DIM$ITALIC" "$RESET"
         read -r _
@@ -665,14 +690,23 @@ run_lpac_capture() {
                 printf '%s\n' '{"type":"lpa","payload":{"code":-1,"message":"mbim_proxy_missing","data":null}}'
                 return 1
         fi
+        readonly_call=0
+        was_up=0
+        if lpac_readonly_action "$@"; then
+                readonly_call=1
+                iface_is_up && was_up=1
+        fi
+        mark_lpac_active
         "$LPAC_BIN" "$@" >"$stdout_file" 2>"$stderr_file"
         status=$?
+        clear_lpac_active
         if [ "$DEBUG" -eq 1 ] && [ -s "$stderr_file" ]; then
                 printf '\n%b--- LPAC STDERR ---%b\n' "$DIM" "$RESET"
                 cat "$stderr_file"
         fi
         cat "$stdout_file"
         rm -f "$stdout_file" "$stderr_file"
+        [ "$readonly_call" = "1" ] && recover_qmodem_if_needed "$was_up" "$*"
         return $status
 }
 
