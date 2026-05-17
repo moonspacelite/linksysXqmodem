@@ -31,9 +31,9 @@ permissions:
   contents: write
 
 env:
-  TARGET_PATH: ipq40xx/generic
-  TARGET_ARCH: arm_cortex-a7_neon-vfpv4
-  PROFILE: linksys_ea6350v3
+  OPENWRT_TARGET_PATH: ipq40xx/generic
+  OPENWRT_PROFILE: linksys_ea6350v3
+  OPENWRT_ARCH_LABEL: arm_cortex-a7_neon-vfpv4
 
 jobs:
   build:
@@ -59,19 +59,19 @@ jobs:
             exit 1
           fi
 
-          base_url="https://downloads.openwrt.org/releases/${version}/targets/${TARGET_PATH}"
+          base_url="https://downloads.openwrt.org/releases/${version}/targets/${OPENWRT_TARGET_PATH}"
           dir_index="$(curl -fsSL "${base_url}/")"
 
           imagebuilder="$(grep -o "openwrt-imagebuilder-${version}-ipq40xx-generic\\.Linux-x86_64\\.tar\\.zst" <<<"$dir_index" | head -n1 || true)"
           sdk="$(grep -o "openwrt-sdk-${version}-ipq40xx-generic_[^\"]*\\.Linux-x86_64\\.tar\\.zst" <<<"$dir_index" | head -n1 || true)"
 
           if [[ -z "$imagebuilder" ]]; then
-            echo "::error::ImageBuilder for OpenWrt ${version} (${TARGET_PATH}) was not found"
+            echo "::error::ImageBuilder for OpenWrt ${version} (${OPENWRT_TARGET_PATH}) was not found"
             exit 1
           fi
 
           if [[ -z "$sdk" ]]; then
-            echo "::error::SDK for OpenWrt ${version} (${TARGET_PATH}) was not found"
+            echo "::error::SDK for OpenWrt ${version} (${OPENWRT_TARGET_PATH}) was not found"
             exit 1
           fi
 
@@ -204,16 +204,16 @@ jobs:
 
           packages="luci ${qmodem_packages} kmod-usb-net-cdc-mbim kmod-usb-serial-option kmod-usb-serial-qualcomm usbutils picocom"
 
-          echo "Building ImageBuilder profile ${PROFILE}"
+          echo "Building ImageBuilder profile ${OPENWRT_PROFILE}"
           echo "Packages: ${packages}"
-          make image PROFILE="${PROFILE}" PACKAGES="${packages}" FILES="files/" V=s
+          make image PROFILE="${OPENWRT_PROFILE}" PACKAGES="${packages}" FILES="files/" V=s
 
       - name: Collect artifacts
         shell: bash
         run: |
           set -euo pipefail
 
-          target_dir="build/imagebuilder/bin/targets/${TARGET_PATH}"
+          target_dir="build/imagebuilder/bin/targets/${OPENWRT_TARGET_PATH}"
           mkdir -p firmware
 
           echo "Target directory contents:"
@@ -231,7 +231,7 @@ jobs:
             echo "OpenWrt version: ${{ steps.inputs.outputs.version }}"
             echo "QModem ref: ${{ steps.inputs.outputs.qmodem_ref }}"
             echo "QModem UI: ${{ inputs.qmodem_ui }}"
-            echo "Target: Linksys EA6350v3 / ipq40xx-generic / arm_cortex-a7_neon-vfpv4"
+            echo "Target: Linksys EA6350v3 / ${OPENWRT_TARGET_PATH} / ${OPENWRT_ARCH_LABEL}"
             echo "Builder: OpenWrt SDK + ImageBuilder"
           } > firmware/build-info.txt
 
