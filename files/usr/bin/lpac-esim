@@ -404,8 +404,8 @@ json_code()      { json_last_line "$1" | "$JQ_BIN" -r '.payload.code // empty' 2
 json_message()   { json_last_line "$1" | "$JQ_BIN" -r '.payload.message // empty' 2>/dev/null; }
 json_data_len()  { json_last_line "$1" | "$JQ_BIN" -r 'if (.payload.data | type) == "array" then (.payload.data | length) else 0 end' 2>/dev/null; }
 
-get_chip_info_json()  { out="${TMP_DIR}/chip.json";     run_lpac_json_to_file "chip info"      "$out" || return 1; printf '%s\n' "$out"; }
-get_profiles_json()   { out="${TMP_DIR}/profiles.json"; run_lpac_json_to_file "profile list"   "$out" || return 1; printf '%s\n' "$out"; }
+get_chip_info_json()  { out="${TMP_DIR}/chip.json";     run_lpac_readonly_json_to_file "chip info"      "$out" || return 1; printf '%s\n' "$out"; }
+get_profiles_json()   { out="${TMP_DIR}/profiles.json"; run_lpac_readonly_json_to_file "profile list"   "$out" || return 1; printf '%s\n' "$out"; }
 mask_iccid() {
     v="$1"; len="$(printf '%s' "$v" | wc -c | awk '{print $1}')"
     if [ "$len" -le 8 ]; then printf '%s' "$v"; return 0; fi
