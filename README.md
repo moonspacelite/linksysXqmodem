@@ -105,6 +105,7 @@ Default LPAC disetel untuk T99W175 mode MBIM:
 - MBIM device: `/dev/cdc-wdm0`
 - MBIM proxy: enabled
 - MBIM skip slot mapping: enabled
+- MBIM UIM slot: `2`
 - AT port: `/dev/ttyUSB2`
 - modem interface untuk switch/reconnect: `1_1`
 - custom ISD-R AID: `A0000005591010FFFFFFFF8900000100`
@@ -114,6 +115,11 @@ port MBIM dengan koneksi modem yang sedang aktif.
 Binary proxy tersebut disediakan oleh paket `libmbim` sebagai
 `/usr/libexec/mbim-proxy`; workflow build akan gagal jika `libmbim` atau
 `mbim-utils` tidak masuk manifest firmware.
+Workflow juga mengganti patch MBIM bawaan feed LPAC dengan patch lokal
+`patches/lpac/100-lpac-mbim-t99w175-l850gl-uicc.patch` yang apply clean ke
+LPAC v2.3.0 resmi. Patch ini mengaktifkan skip slot mapping via env, memakai
+UICC class byte `extended`, open-channel `selectp2arg=0x0c`, dan menambahkan
+`Le=00` untuk APDU envelope `E2`.
 
 Firmware ini sengaja tidak memasukkan `modemmanager` atau
 `luci-proto-modemmanager`. QModem menjadi satu-satunya pemilik koneksi MBIM

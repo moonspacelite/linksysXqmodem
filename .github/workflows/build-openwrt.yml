@@ -292,6 +292,16 @@ jobs:
           git clone "$OXYGEN_AIO_FEED_URL" "$oxygen_feed"
           git -C "$oxygen_feed" checkout --detach "$OXYGEN_AIO_REF"
 
+          if compgen -G "$GITHUB_WORKSPACE/patches/lpac/*.patch" >/dev/null; then
+            mkdir -p "$oxygen_feed/lpac/patches"
+            rm -f \
+              "$oxygen_feed/lpac/patches/100-lpac-mbim-skip-slot-mapping-env.patch" \
+              "$oxygen_feed/lpac/patches/110-lpac-mbim-use-extended-class-byte.patch" \
+              "$oxygen_feed/lpac/patches/120-lpac-mbim-open-channel-select-p2-0c.patch" \
+              "$oxygen_feed/lpac/patches/130-lpac-mbim-append-le00-to-envelope.patch"
+            cp -vf "$GITHUB_WORKSPACE"/patches/lpac/*.patch "$oxygen_feed/lpac/patches/"
+          fi
+
           sed -i '/^src-git 0xygen_aio /d;/^src-link 0xygen_aio /d' feeds.conf.default
           printf '\nsrc-link 0xygen_aio %s\n' "$oxygen_feed" >> feeds.conf.default
           ./scripts/feeds update -a
