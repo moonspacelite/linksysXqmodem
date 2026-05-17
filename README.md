@@ -18,7 +18,7 @@ Workflow otomatis:
 
 - download OpenWrt SDK dan ImageBuilder resmi untuk versi yang dipilih;
 - build paket QModem dari `https://github.com/FUjr/QModem.git` sebagai `.apk`;
-- patch deteksi model `T99W175` agar cocok dengan scan lowercase QModem;
+- patch QModem untuk deteksi dan kontrol T99W175 yang lebih cocok dengan modem ini;
 - build image `ipq40xx/generic` profile `linksys_ea6350v3` dengan ImageBuilder;
 - upload `factory.bin`, `sysupgrade.bin`, `sha256sums`, `profiles.json`, dan `build-info.txt`.
 
@@ -43,6 +43,23 @@ Paket pendukung yang ikut dibuild:
 Pada setup yang umum, AT port T99W175 muncul sebagai `/dev/ttyUSB2`.
 QModem tetap dibiarkan melakukan scan otomatis, jadi port tidak di-hardcode
 ke satu nama device.
+
+Patch QModem yang ikut diterapkan:
+
+- deteksi model `T99W175` tetap cocok setelah nama modem dibuat lowercase;
+- menu SIM Switch memakai `AT^SWITCH_SLOT`, dengan slot `0` untuk SIM fisik dan `1` untuk eSIM;
+- Dial Mode membaca `AT^USBSWITCH?` secara case-insensitive dan fallback ke driver aktif, jadi MBIM tidak tampil `Unknown`;
+- Quick Commands default ke bahasa Inggris saat bahasa LuCI masih `auto`;
+- retry scan saat boot tidak lagi mengirim path `/sys/bus/...` sebagai nama slot modem.
+
+## WiFi default
+
+Saat flash pertama, firmware mengaktifkan WiFi otomatis:
+
+- 2.4 GHz: `0x`
+- 5 GHz: `0x⁵`
+- Password: `1sampai10`
+- Country: `ID`
 
 ## Catatan penting EA6350v3
 

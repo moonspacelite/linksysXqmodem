@@ -1,0 +1,53 @@
+#!/bin/sh
+
+WIFI_PASS='1sampai10'
+SSID_24='0x'
+SSID_5='0x⁵'
+WIFI_COUNTRY='ID'
+
+log() {
+	logger -t linksysxqmodem-wifi "$*"
+}
+
+[ -s /etc/config/wireless ] || wifi config
+
+for radio in radio0 radio1; do
+	uci -q get "wireless.${radio}" >/dev/null || continue
+	uci -q set "wireless.${radio}.disabled=0"
+	uci -q set "wireless.${radio}.country=${WIFI_COUNTRY}"
+	uci -q set "wireless.${radio}.channel=auto"
+done
+
+if uci -q get wireless.radio0 >/dev/null; then
+	uci -q set wireless.radio0.band='2g'
+	uci -q set wireless.radio0.htmode='HT20'
+fi
+
+if uci -q get wireless.radio1 >/dev/null; then
+	uci -q set wireless.radio1.band='5g'
+	uci -q set wireless.radio1.htmode='VHT80'
+fi
+
+uci -q set wireless.default_radio0='wifi-iface'
+uci -q set wireless.default_radio0.device='radio0'
+uci -q set wireless.default_radio0.network='lan'
+uci -q set wireless.default_radio0.mode='ap'
+uci -q set "wireless.default_radio0.ssid=${SSID_24}"
+uci -q set wireless.default_radio0.encryption='psk2'
+uci -q set "wireless.default_radio0.key=${WIFI_PASS}"
+uci -q set wireless.default_radio0.disabled='0'
+
+uci -q set wireless.default_radio1='wifi-iface'
+uci -q set wireless.default_radio1.device='radio1'
+uci -q set wireless.default_radio1.network='lan'
+uci -q set wireless.default_radio1.mode='ap'
+uci -q set "wireless.default_radio1.ssid=${SSID_5}"
+uci -q set wireless.default_radio1.encryption='psk2'
+uci -q set "wireless.default_radio1.key=${WIFI_PASS}"
+uci -q set wireless.default_radio1.disabled='0'
+
+uci -q commit wireless
+wifi reload || wifi
+
+log "wifi configured (2.4G='${SSID_24}', 5G='${SSID_5}', country='${WIFI_COUNTRY}')"
+exit 0

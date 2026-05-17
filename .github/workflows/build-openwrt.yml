@@ -123,6 +123,13 @@ jobs:
           printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git;%s\n' "${{ steps.inputs.outputs.qmodem_ref }}" >> feeds.conf.default
           ./scripts/feeds update -a
 
+          shopt -s nullglob
+          for patch in "$GITHUB_WORKSPACE"/patches/qmodem/*.patch; do
+            echo "Applying QModem patch: $(basename "$patch")"
+            git -C feeds/qmodem apply --unidiff-zero --whitespace=fix "$patch"
+          done
+          shopt -u nullglob
+
           scan_script="feeds/qmodem/application/qmodem/files/usr/share/qmodem/modem_scan.sh"
           if [[ -f "$scan_script" ]]; then
             sed -i 's/\*"T99W175"\*/\*"t99w175"\*/g' "$scan_script"
